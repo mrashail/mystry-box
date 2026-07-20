@@ -1,0 +1,223 @@
+:root {
+  /* Neutrals */
+  --ink: #1a1c23;
+  --muted: #6b7280;
+  --line: #e4e7eb;
+  --line-strong: #c6ccd4;
+  --paper: #ffffff;
+  --bg: #f2f3f5;
+  --field-bg: #ffffff;
+
+  /* Brand + accents (names kept for existing inline `var(--…)` usages) */
+  --green: #1c2b45; /* primary / dark navy accent */
+  --green-hover: #26385a;
+  --mint: #eaf1ff;
+  --coral: #0a6bff; /* blue accent */
+  --violet: #6a48d7; /* purple accent */
+  --teal: #0e8f7e;
+
+  /* Status */
+  --warn-bg: #fff8e6;
+  --warn-line: #f2d888;
+  --warn-ink: #8a5b00;
+  --danger: #c0392b;
+  --danger-bg: #fdecea;
+  --danger-line: #f3c6c1;
+  --ok-bg: #e8f6ee;
+  --ok-line: #bce0c8;
+  --ok-ink: #1a7a45;
+
+  --focus: rgba(10, 107, 255, 0.3);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 1px 2px rgba(20, 28, 45, 0.04), 0 1px 6px rgba(20, 28, 45, 0.05);
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+s-page {
+  --s-page-inline-size: 1200px;
+}
+/* Polaris only guarantees vertical rhythm between same-tag siblings
+   (e.g. s-section + s-section). Pages here mix s-section, s-grid,
+   s-banner and plain divs at the top level, so enforce one consistent
+   gap ourselves rather than leaving mixed-tag pairs flush against
+   each other. */
+s-page > *:not([slot]) {
+  margin-block-end: 16px;
+}
+s-page > *:not([slot]):last-child {
+  margin-block-end: 0;
+}
+
+
+.eyebrow {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ---------- Dashboard hero ---------- */
+.dashboard-hero {
+  border-radius: 18px;
+  background: linear-gradient(125deg, #16233c 0%, #1d3f6b 52%, #0a6bff 100%);
+  color: #fff;
+  padding: 40px 44px;
+  display: grid;
+  grid-template-columns: 1.5fr 0.5fr;
+  align-items: center;
+  overflow: hidden;
+  position: relative;
+}
+.dashboard-hero h1 {
+  font-size: 34px;
+  line-height: 1.1;
+  max-width: 640px;
+  margin: 12px 0 14px;
+  letter-spacing: -0.03em;
+}
+.dashboard-hero p {
+  color: #d4e4fb;
+  font-size: 15px;
+  line-height: 1.6;
+  max-width: 600px;
+  margin: 0;
+}
+.dashboard-hero .eyebrow {
+  color: #a9cdfb;
+}
+.hero-visual {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  background: #ff9a6b;
+  width: 22px;
+  height: 22px;
+}
+.orb.one {
+  top: -18px;
+  right: 44px;
+}
+.orb.two {
+  background: #cbe0ff;
+  width: 14px;
+  height: 14px;
+  bottom: 4px;
+  left: 44px;
+}
+
+/* ---------- Page intro ---------- */
+.page-intro {
+  border-radius: 16px;
+  padding: 28px 32px;
+  background: linear-gradient(110deg, #eef4fb, #f8fbff);
+  border: 1px solid #dbe6f2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 24px;
+}
+.page-intro h2 {
+  font-size: 25px;
+  margin: 8px 0 6px;
+  letter-spacing: -0.02em;
+}
+.page-intro p {
+  color: #52627a;
+  max-width: 680px;
+  margin: 0;
+  line-height: 1.55;
+}
+.mystery-intro {
+  background: linear-gradient(110deg, #f1ecfd, #faf8ff);
+  border-color: #e0d7f7;
+}
+.hero-stat {
+  text-align: right;
+  border-left: 1px solid rgba(30, 50, 80, 0.14);
+  padding-left: 28px;
+  flex: none;
+}
+.hero-stat strong {
+  font-size: 34px;
+  display: block;
+  letter-spacing: -0.02em;
+}
+.hero-stat span {
+  color: var(--muted);
+}
+
+/* ---------- Native datetime field (no Polaris date/time component exists) ---------- */
+.native-datetime-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 650;
+  width: 100%;
+}
+.native-datetime-field > span {
+  color: #3a4250;
+}
+.native-datetime-field input[type="datetime-local"] {
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 11px;
+  min-height: 36px;
+  background: var(--field-bg);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
+  min-width: 0;
+  box-sizing: border-box;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.native-datetime-field input[type="datetime-local"]:focus {
+  outline: none;
+  border-color: var(--coral);
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 960px) {
+  .dashboard-hero {
+    grid-template-columns: 1fr;
+    padding: 32px;
+  }
+  .hero-visual {
+    display: none;
+  }
+}
+@media (max-width: 600px) {
+  .dashboard-hero h1 {
+    font-size: 27px;
+  }
+  .page-intro {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+  .hero-stat {
+    border-left: 0;
+    padding-left: 0;
+    text-align: left;
+  }
+}

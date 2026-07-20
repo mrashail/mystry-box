@@ -1,0 +1,22 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "GiftLab Checkout Discounts"
+handle = "giftlab-checkout-discounts"
+uid = "9f1d213b-a41b-47cc-bf08-6cf771f81e66"
+type = "function"
+description = "Protects free gifts and applies Mystery Box price tiers"
+
+[[extensions.targeting]]
+target = "cart.lines.discounts.generate.run"
+input_query = "src/cart_lines_discounts_generate_run.graphql"
+export = "cart_lines_discounts_generate_run"
+
+[extensions.ui.paths]
+create = "/app/settings"
+details = "/app/rules"
+
+[extensions.build]
+command = "cargo build --target=wasm32-unknown-unknown --release"
+path = "target/wasm32-unknown-unknown/release/giftlab-discounts.wasm"
+watch = [ "src/**/*.rs", "src/**/*.graphql" ]

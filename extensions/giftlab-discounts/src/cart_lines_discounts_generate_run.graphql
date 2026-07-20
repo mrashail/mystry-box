@@ -1,0 +1,40 @@
+query Input {
+  cart {
+    cost {
+      subtotalAmount { amount }
+    }
+    lines {
+      id
+      quantity
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          product { id }
+        }
+      }
+      cost { amountPerQuantity { amount currencyCode } }
+      freeGiftRule: attribute(key: "_free_gift_rule") { value }
+      freeGiftDiscountType: attribute(key: "_free_gift_discount_type") { value }
+      freeGiftDiscountValue: attribute(key: "_free_gift_discount_value") { value }
+      freeGiftName: attribute(key: "_free_gift_name") { value }
+      freeGiftConditions: attribute(key: "_free_gift_conditions") { value }
+      freeGiftUnverifiable: attribute(key: "_free_gift_unverifiable") { value }
+      mysteryReward: attribute(key: "_mystery_box_reward") { value }
+      mysteryRewardName: attribute(key: "_mystery_reward_name") { value }
+      priceType: attribute(key: "_mystery_price_type") { value }
+      priceValue: attribute(key: "_mystery_price_value") { value }
+      pricingBox: attribute(key: "_mystery_pricing_box") { value }
+      promotionKind: attribute(key: "_promotion_kind") { value }
+      promotionSignature: attribute(key: "_promotion_signature") { value }
+      mysteryBoxId: attribute(key: "_mystery_box_id") { value }
+      mysteryTriggerProductId: attribute(key: "_mystery_trigger_product_id") { value }
+      mysteryTriggerVariantId: attribute(key: "_mystery_trigger_variant_id") { value }
+      mysteryTriggerMinQty: attribute(key: "_mystery_trigger_min_qty") { value }
+    }
+  }
+  discount {
+    discountClasses
+    signatureConfig: metafield(namespace: "$app:giftlab-checkout-discounts", key: "signature-secret") { value }
+  }
+}

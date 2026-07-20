@@ -1,0 +1,218 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model ShopSettings {
+  id                  String   @id @default(cuid())
+  shop                String   @unique
+  storefrontEnabled   Boolean  @default(true)
+  giftMessageEnabled  Boolean  @default(true)
+  giftMessage         String   @default("🎁 A free gift has been added to your cart.")
+  mysteryMessage      String   @default("🎉 Your mystery item has been selected.")
+  conflictStrategy    String   @default("PRIORITY")
+  maxAutomaticAdds    Int      @default(10)
+  automaticDiscountId String?
+  cartTransformId     String?
+  promotionSecret     String   @default(uuid())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model GiftRule {
+  id              String   @id @default(cuid())
+  shop            String
+  name            String
+  description     String?
+  enabled         Boolean  @default(true)
+  priority        Int      @default(100)
+  matchMode       String   @default("ALL")
+  conditions      Json
+  gifts           Json
+  allowMultiple   Boolean  @default(false)
+  maxGifts        Int      @default(1)
+  stackable       Boolean  @default(true)
+  startsAt        DateTime?
+  endsAt          DateTime?
+  restrictions    Json
+  notification    String?
+  // The rule's own automatic discount entry in Shopify's native Discounts
+  // admin (backed by the shared checkout Function), created/removed as the
+  // rule is created, enabled, disabled, or deleted.
+  shopifyDiscountId String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([shop, enabled, priority])
+}
+
+model MysteryBox {
+  id                    String   @id @default(cuid())
+  shop                  String
+  name                  String
+  description           String?
+  enabled               Boolean  @default(true)
+  priority              Int      @default(100)
+  parentProductId       String
+  parentProductTitle    String
+  parentVariantId       String?
+  parentVariantTitle    String?
+  selectionMethod       String   @default("RANDOM")
+  inventoryBehavior     String   @default("IN_STOCK_ONLY")
+  selectionCount        Int      @default(1)
+  allowDuplicateChoices Boolean  @default(false)
+  matchingRules         Json
+  priceTiers            Json
+  bogo                   Json
+  restrictions          Json
+  startsAt              DateTime?
+  endsAt                DateTime?
+  cursor                 Int      @default(0)
+  // Hidden storefront product that represents the box itself (image + price) in
+  // cart and checkout, so the real child product never has to be shown or renamed.
+  boxProductId          String?
+  boxVariantId          String?
+  boxPrice              Decimal  @default(0)
+  boxImageUrl           String?
+  // The box's own automatic discount entry in Shopify's native Discounts
+  // admin (backed by the shared checkout Function), created/removed as the
+  // box is created, enabled, disabled, or deleted.
+  shopifyDiscountId     String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+  children               MysteryBoxChild[]
+
+  @@index([shop, enabled, priority])
+  @@index([shop, parentProductId])
+  @@index([shop, parentVariantId])
+}
+
+model MysteryBoxChild {
+  id                String     @id @default(cuid())
+  mysteryBoxId      String
+  mysteryBox        MysteryBox @relation(fields: [mysteryBoxId], references: [id], onDelete: Cascade)
+  productId         String
+  productTitle      String
+  variantId         String
+  variantTitle      String
+  sku               String?
+  imageUrl          String?
+  inventoryQuantity Int?
+  available         Boolean    @default(true)
+  weight            Int        @default(1)
+  position          Int        @default(0)
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@unique([mysteryBoxId, variantId])
+  @@index([mysteryBoxId, position])
+}
+
+model CatalogVariant {
+  id                String   @id @default(cuid())
+  shop              String
+  productId         String
+  productTitle      String
+  productHandle     String?
+  productType       String?
+  vendor            String?
+  tags              Json
+  collectionIds     Json
+  variantId         String
+  inventoryItemId   String?
+  variantTitle      String
+  sku               String?
+  imageUrl          String?
+  price             Decimal?
+  inventoryQuantity Int?
+  available         Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
+  createdAt         DateTime @default(now())
+
+  @@unique([shop, variantId])
+  @@index([shop, productId])
+  @@index([shop, sku])
+  @@index([shop, inventoryItemId])
+}
+
+model PromotionUsage {
+  id            String   @id @default(cuid())
+  shop          String
+  promotionType String
+  promotionId   String
+  customerId    String?
+  orderId       String?
+  cartToken     String?
+  quantity      Int      @default(1)
+  metadata      Json?
+  createdAt     DateTime @default(now())
+
+  @@index([shop, promotionType, promotionId])
+  @@index([shop, customerId])
+  @@index([shop, orderId])
+  @@unique([shop, promotionType, promotionId, orderId])
+}
+
+model MysterySelection {
+  id              String   @id @default(cuid())
+  shop            String
+  mysteryBoxId    String
+  cartToken       String
+  parentLineKey   String
+  selectedVariants Json
+  selectionQuantity Int     @default(1)
+  status          String   @default("CART")
+  orderId         String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([shop, cartToken, parentLineKey, mysteryBoxId])
+  @@index([shop, orderId])
+}
+
+// One row per (customer, box, variant) actually shipped in a completed order —
+// written by the orders/create webhook, not the cart-evaluation path, so an
+// abandoned cart's random pick never counts as "already received" and wrongly
+// excludes that variant from a customer's future picks.
+model MysteryCustomerHistory {
+  id           String   @id @default(cuid())
+  shop         String
+  customerId   String
+  mysteryBoxId String
+  variantId    String
+  orderId      String
+  createdAt    DateTime @default(now())
+
+  @@unique([shop, customerId, mysteryBoxId, variantId, orderId])
+  @@index([shop, customerId, mysteryBoxId])
+}

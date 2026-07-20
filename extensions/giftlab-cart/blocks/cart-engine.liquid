@@ -1,0 +1,24 @@
+<div
+  id="giftlab-cart-engine"
+  hidden
+  data-country="{{ localization.country.iso_code | escape }}"
+  data-customer-id="{{ customer.id | default: '' }}"
+  data-customer-tags="{{ customer.tags | join: ',' | escape }}"
+  data-customer-orders="{{ customer.orders_count | default: 0 }}"
+  data-gift-message="{{ block.settings.gift_message | escape }}"
+  data-mystery-message="{{ block.settings.mystery_message | escape }}"
+  data-show-notifications="{{ block.settings.show_notifications }}"
+></div>
+
+{% schema %}
+{
+  "name": "GiftLab Cart Engine",
+  "target": "body",
+  "javascript": "giftlab-cart.js",
+  "settings": [
+    { "type": "checkbox", "id": "show_notifications", "label": "Show cart notifications", "default": true },
+    { "type": "text", "id": "gift_message", "label": "Gift message", "default": "A free gift has been added to your cart." },
+    { "type": "text", "id": "mystery_message", "label": "Mystery box message", "default": "Your mystery item has been selected." }
+  ]
+}
+{% endschema %}

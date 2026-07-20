@@ -1,0 +1,450 @@
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import { Form, useLoaderData, useNavigate } from "react-router";
+import prisma from "../db.server";
+import { authenticate } from "../shopify.server";
+import { prismaJson } from "../lib/forms.server";
+import {
+  createPromotionDiscount,
+  deletePromotionDiscount,
+  ensurePromotionSecret,
+} from "../lib/checkout-discount.server";
+
+export async function loader({ request }: LoaderFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const [gifts, mysteries, selections, catalog] = await Promise.all([
+    prisma.giftRule.findMany({
+      where: { shop: session.shop },
+      orderBy: [{ priority: "asc" }, { updatedAt: "desc" }],
+    }),
+    prisma.mysteryBox.findMany({
+      where: { shop: session.shop },
+      include: { children: true },
+      orderBy: [{ priority: "asc" }, { updatedAt: "desc" }],
+    }),
+    prisma.mysterySelection.count({ where: { shop: session.shop } }),
+    prisma.catalogVariant.count({ where: { shop: session.shop } }),
+  ]);
+
+  // Each enabled rule/box should carry its own Shopify discount id (created
+  // automatically when it was turned on). Any without one means creation
+  // failed or predates that mechanism — surface it instead of a blanket
+  // "not activated" banner.
+  const missingDiscounts =
+    gifts.filter((rule) => rule.enabled && !rule.shopifyDiscountId).length +
+    mysteries.filter((box) => box.enabled && !box.shopifyDiscountId).length;
+
+  const active = (r: { enabled: boolean; startsAt: Date | null; endsAt: Date | null }) => {
+    if (!r.enabled) return false;
+    const now = new Date();
+    if (r.startsAt && r.startsAt > now) return false;
+    if (r.endsAt && r.endsAt < now) return false;
+    return true;
+  };
+
+  const activeGifts = gifts.filter(active).length;
+  const activeBoxes = mysteries.filter(active).length;
+
+  const totalActive = activeGifts + activeBoxes;
+  const totalDisabled = (gifts.length - activeGifts) + (mysteries.length - activeBoxes);
+
+  const freeGiftRulesCount = gifts.length;
+  const mysteryBoxRulesCount = mysteries.filter((b) => {
+    const bogoVal = b.bogo as any;
+    return !bogoVal || !bogoVal.enabled;
+  }).length;
+  const bogoRulesCount = mysteries.filter((b) => {
+    const bogoVal = b.bogo as any;
+    return bogoVal && bogoVal.enabled;
+  }).length;
+
+  const combined = [
+    ...gifts.map((item) => ({
+      id: item.id,
+      name: item.name,
+      type: "GIFT" as const,
+      typeName: "Free Gift",
+      enabled: item.enabled,
+      priority: item.priority,
+      startsAt: item.startsAt,
+      endsAt: item.endsAt,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      details: `${item.matchMode === "ALL" ? "All conditions" : "Any condition"} · ${item.maxGifts} gift${item.maxGifts === 1 ? "" : "s"}`,
+      editUrl: `/app/gifts/${item.id}`,
+    })),
+    ...mysteries.map((item) => {
+      const bogoVal = item.bogo as any;
+      const isBogo = bogoVal && bogoVal.enabled;
+      // Every pool item is currently unavailable/out of stock, so the box (or
+      // BOGO reward) would silently fail to add anything hidden when a
+      // shopper triggers it — surface it here instead of leaving it silent.
+      const poolExhausted =
+        item.inventoryBehavior !== "IGNORE" &&
+        item.children.length > 0 &&
+        !item.children.some(
+          (child) =>
+            child.available &&
+            (child.inventoryQuantity === null || child.inventoryQuantity > 0),
+        );
+      return {
+        id: item.id,
+        name: item.name,
+        type: "MYSTERY" as const,
+        typeName: isBogo ? "Mystery Box BOGO" : "Mystery Box",
+        enabled: item.enabled,
+        priority: item.priority,
+        startsAt: item.startsAt,
+        endsAt: item.endsAt,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+        details: isBogo
+          ? `Buy ${bogoVal.buyQuantity || 1} → Get ${bogoVal.freeQuantity || 1} Free`
+          : `${item.children.length} pool variants · ${item.selectionMethod.toLowerCase().replace("_", " ")}`,
+        editUrl: `/app/mystery-boxes/${item.id}`,
+        poolExhausted,
+      };
+    }),
+  ].sort((a, b) => a.priority - b.priority || b.updatedAt.getTime() - a.updatedAt.getTime());
+
+  const exhaustedBoxCount = combined.filter(
+    (rule) => rule.enabled && "poolExhausted" in rule && rule.poolExhausted,
+  ).length;
+
+  return {
+    rules: combined,
+    metrics: {
+      totalActive,
+      totalDisabled,
+      freeGiftRulesCount,
+      mysteryBoxRulesCount,
+      bogoRulesCount,
+      selections,
+      catalog,
+    },
+    missingDiscounts,
+    exhaustedBoxCount,
+  };
+}
+
+export async function action({ request }: ActionFunctionArgs) {
+  const { session, admin } = await authenticate.admin(request);
+  const form = await request.formData();
+  const id = String(form.get("id") ?? "");
+  const type = String(form.get("type") ?? "");
+  const intent = String(form.get("intent") ?? "");
+
+  if (type === "GIFT") {
+    const rule = await prisma.giftRule.findFirst({ where: { id, shop: session.shop } });
+    if (!rule) return Response.json({ ok: false }, { status: 404 });
+
+    if (intent === "delete") {
+      if (rule.shopifyDiscountId) await deletePromotionDiscount(admin, rule.shopifyDiscountId);
+      await prisma.giftRule.delete({ where: { id } });
+    } else if (intent === "toggle") {
+      const enabling = !rule.enabled;
+      let shopifyDiscountId = rule.shopifyDiscountId;
+      if (enabling && !shopifyDiscountId) {
+        try {
+          const secret = await ensurePromotionSecret(session.shop);
+          shopifyDiscountId = await createPromotionDiscount(admin, {
+            title: `Free gift: ${rule.name}`,
+            secret,
+          });
+        } catch (error) {
+          return Response.json(
+            { ok: false, error: error instanceof Error ? error.message : "Could not activate the checkout discount." },
+            { status: 400 },
+          );
+        }
+      } else if (!enabling && shopifyDiscountId) {
+        await deletePromotionDiscount(admin, shopifyDiscountId);
+        shopifyDiscountId = null;
+      }
+      await prisma.giftRule.update({ where: { id }, data: { enabled: enabling, shopifyDiscountId } });
+    } else if (intent === "duplicate") {
+      await prisma.giftRule.create({
+        data: {
+          shop: session.shop,
+          name: `${rule.name} (copy)`,
+          description: rule.description,
+          enabled: false,
+          priority: rule.priority,
+          matchMode: rule.matchMode,
+          conditions: prismaJson(rule.conditions),
+          gifts: prismaJson(rule.gifts),
+          allowMultiple: rule.allowMultiple,
+          maxGifts: rule.maxGifts,
+          stackable: rule.stackable,
+          startsAt: rule.startsAt,
+          endsAt: rule.endsAt,
+          restrictions: prismaJson(rule.restrictions),
+          notification: rule.notification,
+        },
+      });
+    }
+  } else if (type === "MYSTERY") {
+    const box = await prisma.mysteryBox.findFirst({
+      where: { id, shop: session.shop },
+      include: { children: true },
+    });
+    if (!box) return Response.json({ ok: false }, { status: 404 });
+
+    if (intent === "delete") {
+      if (box.shopifyDiscountId) await deletePromotionDiscount(admin, box.shopifyDiscountId);
+      await prisma.mysteryBox.delete({ where: { id } });
+    } else if (intent === "toggle") {
+      const enabling = !box.enabled;
+      let shopifyDiscountId = box.shopifyDiscountId;
+      if (enabling && !shopifyDiscountId) {
+        try {
+          const secret = await ensurePromotionSecret(session.shop);
+          const isBogo = (box.bogo as { enabled?: boolean } | null)?.enabled;
+          shopifyDiscountId = await createPromotionDiscount(admin, {
+            title: `${isBogo ? "Mystery Box BOGO" : "Mystery box"}: ${box.name}`,
+            secret,
+          });
+        } catch (error) {
+          return Response.json(
+            { ok: false, error: error instanceof Error ? error.message : "Could not activate the checkout discount." },
+            { status: 400 },
+          );
+        }
+      } else if (!enabling && shopifyDiscountId) {
+        await deletePromotionDiscount(admin, shopifyDiscountId);
+        shopifyDiscountId = null;
+      }
+      await prisma.mysteryBox.update({ where: { id }, data: { enabled: enabling, shopifyDiscountId } });
+    } else if (intent === "duplicate") {
+      await prisma.mysteryBox.create({
+        data: {
+          shop: session.shop,
+          name: `${box.name} (copy)`,
+          description: box.description,
+          enabled: false,
+          priority: box.priority,
+          parentProductId: box.parentProductId,
+          parentProductTitle: box.parentProductTitle,
+          parentVariantId: box.parentVariantId,
+          parentVariantTitle: box.parentVariantTitle,
+          selectionMethod: box.selectionMethod,
+          inventoryBehavior: box.inventoryBehavior,
+          selectionCount: box.selectionCount,
+          allowDuplicateChoices: box.allowDuplicateChoices,
+          matchingRules: prismaJson(box.matchingRules),
+          priceTiers: prismaJson(box.priceTiers),
+          bogo: prismaJson(box.bogo),
+          restrictions: prismaJson(box.restrictions),
+          boxPrice: box.boxPrice,
+          boxImageUrl: box.boxImageUrl,
+          startsAt: box.startsAt,
+          endsAt: box.endsAt,
+          children: {
+            create: box.children.map((child) => ({
+              productId: child.productId,
+              productTitle: child.productTitle,
+              variantId: child.variantId,
+              variantTitle: child.variantTitle,
+              sku: child.sku,
+              imageUrl: child.imageUrl,
+              inventoryQuantity: child.inventoryQuantity,
+              available: child.available,
+              weight: child.weight,
+              position: child.position,
+            })),
+          },
+        },
+      });
+    }
+  }
+
+  return { ok: true };
+}
+
+export default function UnifiedRules() {
+  const { rules, metrics, missingDiscounts, exhaustedBoxCount } = useLoaderData<typeof loader>();
+  const navigate = useNavigate();
+
+  const formatDate = (date: string | Date) => {
+    return new Date(date).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  };
+
+  return (
+    <s-page heading="Promotional rules">
+      <div className="page-intro" style={{ background: "linear-gradient(110deg, #e8f2f5, #f7fbfb)", borderColor: "#d0e4ea" }}>
+        <div>
+          <span className="eyebrow" style={{ color: "#3a6d7a" }}>PROMOTIONS CONTROL CENTER</span>
+          <h2>A single hub for all rules.</h2>
+          <p>
+            Create, manage, and coordinate your Free Gift and Mystery Box promotions in one priority-ordered index.
+          </p>
+        </div>
+        <div className="hero-stat" style={{ borderLeftColor: "rgba(58, 109, 122, 0.16)" }}>
+          <strong>{rules.filter((rule) => rule.enabled).length}</strong>
+          <span style={{ color: "#567b84" }}>active rules</span>
+        </div>
+      </div>
+
+      {missingDiscounts > 0 && (
+          <s-banner
+            tone="critical"
+            heading={`${missingDiscounts} active rule${missingDiscounts === 1 ? "" : "s"} missing its checkout discount`}
+          >
+            <s-paragraph>
+              It won&apos;t apply at checkout until this is fixed. <s-link href="/app/settings">Fix now in Settings</s-link>
+            </s-paragraph>
+          </s-banner>
+        )}
+
+        {exhaustedBoxCount > 0 && (
+          <s-banner
+            tone="warning"
+            heading={`${exhaustedBoxCount} active mystery box${exhaustedBoxCount === 1 ? "" : "es"} ha${exhaustedBoxCount === 1 ? "s" : "ve"} an empty pool`}
+          >
+            <s-paragraph>
+              Every item in it is out of stock, so it won&apos;t add anything hidden to the cart until you restock or add more pool items.
+            </s-paragraph>
+          </s-banner>
+        )}
+
+        <s-section padding="base">
+          <s-grid gridTemplateColumns="1fr auto 1fr auto 1fr auto 1fr" gap="base" alignItems="center">
+            <s-stack direction="inline" gap="base" alignItems="start">
+              <s-icon type="check-circle" tone="success"></s-icon>
+              <s-stack direction="block" gap="small-100">
+                <s-text type="strong">{metrics.totalActive}</s-text>
+                <s-text>Active rules</s-text>
+                <s-text color="subdued">{metrics.totalDisabled} disabled</s-text>
+              </s-stack>
+            </s-stack>
+            <s-divider direction="block"></s-divider>
+            <s-stack direction="inline" gap="base" alignItems="start">
+              <s-icon type="gift-card" tone="auto"></s-icon>
+              <s-stack direction="block" gap="small-100">
+                <s-text type="strong">{metrics.freeGiftRulesCount}</s-text>
+                <s-text>Free Gift rules</s-text>
+              </s-stack>
+            </s-stack>
+            <s-divider direction="block"></s-divider>
+            <s-stack direction="inline" gap="base" alignItems="start">
+              <s-icon type="package" tone="auto"></s-icon>
+              <s-stack direction="block" gap="small-100">
+                <s-text type="strong">{metrics.mysteryBoxRulesCount}</s-text>
+                <s-text>Mystery Box rules</s-text>
+              </s-stack>
+            </s-stack>
+            <s-divider direction="block"></s-divider>
+            <s-stack direction="inline" gap="base" alignItems="start">
+              <s-icon type="check-circle" tone="success"></s-icon>
+              <s-stack direction="block" gap="small-100">
+                <s-text type="strong">{metrics.catalog}</s-text>
+                <s-text>Synced variants</s-text>
+                <s-text color="subdued">{metrics.selections} selections</s-text>
+              </s-stack>
+            </s-stack>
+          </s-grid>
+        </s-section>
+
+        <s-section heading="Campaign rules">
+          <s-stack direction="block" gap="base">
+            <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between">
+              <s-text color="subdued">{rules.length} total rule{rules.length === 1 ? "" : "s"}</s-text>
+              <s-stack direction="inline" gap="small-300">
+                <s-button icon="package" onClick={() => navigate("/app/mystery-boxes/new?type=STANDARD")}>
+                  Create mystery box
+                </s-button>
+                <s-button variant="primary" icon="gift-card" onClick={() => navigate("/app/gifts/new")}>
+                  Create free gift
+                </s-button>
+              </s-stack>
+            </s-stack>
+
+            {rules.length ? (
+              <s-table>
+                <s-table-header-row>
+                  <s-table-header listSlot="primary">Rule name</s-table-header>
+                  <s-table-header>Type</s-table-header>
+                  <s-table-header>Priority</s-table-header>
+                  <s-table-header>Created / Updated</s-table-header>
+                  <s-table-header>Status</s-table-header>
+                  <s-table-header>Actions</s-table-header>
+                </s-table-header-row>
+                <s-table-body>
+                  {rules.map((rule) => (
+                    <s-table-row key={`${rule.type}-${rule.id}`}>
+                      <s-table-cell>
+                        <s-stack direction="block" gap="small-100">
+                          <s-link href={rule.editUrl}>{rule.name}</s-link>
+                          <s-text color="subdued">{rule.details}</s-text>
+                          {"poolExhausted" in rule && rule.poolExhausted && (
+                            <s-text tone="warning">⚠ Pool out of stock</s-text>
+                          )}
+                        </s-stack>
+                      </s-table-cell>
+                      <s-table-cell>{rule.typeName}</s-table-cell>
+                      <s-table-cell>#{rule.priority}</s-table-cell>
+                      <s-table-cell>
+                        <s-stack direction="block" gap="small-100">
+                          <s-text color="subdued">Created {formatDate(rule.createdAt)}</s-text>
+                          <s-text color="subdued">Updated {formatDate(rule.updatedAt)}</s-text>
+                        </s-stack>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <s-badge tone={rule.enabled ? "success" : "neutral"}>
+                          {rule.enabled ? "Active" : "Disabled"}
+                        </s-badge>
+                      </s-table-cell>
+                      <s-table-cell>
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <Form method="post">
+                            <input type="hidden" name="id" value={rule.id} />
+                            <input type="hidden" name="type" value={rule.type} />
+                            <input type="hidden" name="intent" value="toggle" />
+                            <s-button type="submit">
+                              {rule.enabled ? "Disable" : "Enable"}
+                            </s-button>
+                          </Form>
+                          <Form method="post">
+                            <input type="hidden" name="id" value={rule.id} />
+                            <input type="hidden" name="type" value={rule.type} />
+                            <input type="hidden" name="intent" value="duplicate" />
+                            <s-button type="submit" icon="duplicate">
+                              Copy
+                            </s-button>
+                          </Form>
+                          <Form method="post">
+                            <input type="hidden" name="id" value={rule.id} />
+                            <input type="hidden" name="type" value={rule.type} />
+                            <input type="hidden" name="intent" value="delete" />
+                            <s-button type="submit" tone="critical" icon="delete">
+                              Delete
+                            </s-button>
+                          </Form>
+                        </div>
+                      </s-table-cell>
+                    </s-table-row>
+                  ))}
+                </s-table-body>
+              </s-table>
+            ) : (
+              <s-box padding="large">
+                <s-stack direction="block" gap="base" alignItems="center">
+                  <s-icon type="collection" color="subdued"></s-icon>
+                  <s-heading>No rules found</s-heading>
+                  <s-text color="subdued">
+                    Get started by creating your first Free Gift or Mystery Box promotion to delight customers.
+                  </s-text>
+                  <s-button variant="primary" icon="plus" onClick={() => navigate("/app/gifts/new")}>
+                    Create your first rule
+                  </s-button>
+                </s-stack>
+              </s-box>
+            )}
+          </s-stack>
+        </s-section>
+    </s-page>
+  );
+}

@@ -1,0 +1,35 @@
+{
+  "cart": {
+    "lines": [
+      {
+        "id": "gid://shopify/CartLine/gift",
+        "quantity": 1,
+        "merchandise": { "__typename": "ProductVariant", "id": "gid://shopify/ProductVariant/111" },
+        "cost": { "amountPerQuantity": { "amount": "20.00", "currencyCode": "USD" } },
+        "freeGiftRule": { "value": "rule-1" },
+        "mysteryReward": null,
+        "priceType": null,
+        "priceValue": null,
+        "pricingBox": null,
+        "promotionKind": { "value": "free_gift" },
+        "promotionSignature": { "value": "61592e3f1951b10c4bb87361ca0d9a195c18d60d07e71a71ba621b3fa05de5de" },
+        "mysteryBoxId": null
+      },
+      {
+        "id": "gid://shopify/CartLine/box",
+        "quantity": 2,
+        "merchandise": { "__typename": "ProductVariant", "id": "gid://shopify/ProductVariant/222" },
+        "cost": { "amountPerQuantity": { "amount": "15.00", "currencyCode": "USD" } },
+        "freeGiftRule": null,
+        "mysteryReward": null,
+        "priceType": { "value": "PERCENT_OFF" },
+        "priceValue": { "value": "30" },
+        "pricingBox": { "value": "box-1" },
+        "promotionKind": null,
+        "promotionSignature": { "value": "d4bc92fd6875c2a0d7373106cb35343a90b1cd10a10b52dc6fa85512365d4a15" },
+        "mysteryBoxId": null
+      }
+    ]
+  },
+  "discount": { "discountClasses": ["PRODUCT"], "signatureConfig": { "value": "fixture-secret" } }
+}
