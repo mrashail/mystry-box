@@ -41,6 +41,7 @@ export interface GiftChoice {
   productTitle?: string;
   variantId: string;
   variantTitle?: string;
+  imageUrl?: string;
   quantity?: number;
   discountType?: "FREE" | "PERCENT_OFF" | "FIXED_OFF";
   discountValue?: number;

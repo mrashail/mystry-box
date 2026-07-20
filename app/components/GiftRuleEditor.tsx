@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Form, useActionData, useNavigate, useNavigation } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import type { GiftChoice, RuleCondition } from "../lib/promotions.types";
+import { resourceImage, meaningfulVariantTitle } from "../lib/resource-display";
 
 export interface GiftRuleEditorValue {
   id?: string;
@@ -185,6 +186,7 @@ export function GiftRuleEditor({
           productTitle: product.title ?? "Untitled product",
           variantId: variant.id,
           variantTitle: variant.title ?? "Default",
+          imageUrl: resourceImage(product, variant),
           quantity: 1,
         });
       }
@@ -531,14 +533,30 @@ export function GiftRuleEditor({
             </s-stack>
 
             <s-box padding="base" background="subdued" borderRadius="base">
-              <s-stack direction="inline" gap="base" alignItems="center">
-                <s-icon type="gift-card" tone="auto"></s-icon>
-                <s-stack direction="block" gap="small-100">
-                  <s-text type="strong">{giftLabel}</s-text>
-                  <s-text color="subdued">
-                    Products are protected by the checkout discount function.
-                  </s-text>
+              <s-stack direction="block" gap="base">
+                <s-stack direction="inline" gap="base" alignItems="center">
+                  <s-icon type="gift-card" tone="auto"></s-icon>
+                  <s-stack direction="block" gap="small-100">
+                    <s-text type="strong">{giftLabel}</s-text>
+                    <s-text color="subdued">
+                      Products are protected by the checkout discount function.
+                    </s-text>
+                  </s-stack>
                 </s-stack>
+                {gifts.some((gift) => gift.imageUrl) && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {gifts
+                      .filter((gift) => gift.imageUrl)
+                      .map((gift) => (
+                        <s-thumbnail
+                          key={gift.variantId}
+                          src={gift.imageUrl}
+                          alt={gift.productTitle ?? "Product"}
+                          size="small"
+                        ></s-thumbnail>
+                      ))}
+                  </div>
+                )}
               </s-stack>
             </s-box>
 
@@ -552,10 +570,21 @@ export function GiftRuleEditor({
                     borderRadius="base"
                   >
                     <s-stack direction="block" gap="small-300">
-                      <s-grid gridTemplateColumns="1fr 40px" gap="base" alignItems="center">
-                        <s-stack direction="block" gap="small-100">
+                      <s-grid gridTemplateColumns="auto 1fr auto" gap="base" alignItems="center">
+                        {gift.imageUrl ? (
+                          <s-thumbnail src={gift.imageUrl} alt={gift.productTitle ?? "Product"} size="small"></s-thumbnail>
+                        ) : (
+                          <s-box padding="small-300" background="subdued" borderRadius="base">
+                            <s-icon type="product" tone="auto"></s-icon>
+                          </s-box>
+                        )}
+                        <s-stack direction="block" gap="small-500">
                           <s-text type="strong">{gift.productTitle}</s-text>
-                          <s-text color="subdued">{gift.variantTitle}</s-text>
+                          {meaningfulVariantTitle(gift.productTitle, gift.variantTitle) ? (
+                            <s-text color="subdued">
+                              {meaningfulVariantTitle(gift.productTitle, gift.variantTitle)}
+                            </s-text>
+                          ) : null}
                         </s-stack>
                         <s-button
                           icon="delete"

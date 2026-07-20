@@ -3,6 +3,7 @@ import { useLoaderData, useNavigate } from "react-router";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 import { GiftIcon } from "../components/Icons";
+import { MetricTile } from "../components/MetricTile";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -147,40 +148,36 @@ export default function Dashboard() {
         </s-section>
 
         <s-section padding="base">
-          <s-grid gridTemplateColumns="1fr auto 1fr auto 1fr auto 1fr" gap="base" alignItems="center">
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="check-circle" tone="success"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{data.totalActive}</s-text>
-                <s-text>Active rules</s-text>
-                <s-text color="subdued">{data.totalDisabled} disabled</s-text>
-              </s-stack>
-            </s-stack>
+          <s-grid gridTemplateColumns="1fr auto 1fr auto 1fr auto 1fr" gap="large" alignItems="center">
+            <MetricTile
+              icon="check-circle"
+              tone="success"
+              value={data.totalActive}
+              label="Active rules"
+              detail={`${data.totalDisabled} disabled`}
+            />
             <s-divider direction="block"></s-divider>
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="gift-card" tone="auto"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{data.freeGiftRulesCount}</s-text>
-                <s-text>Free Gift rules</s-text>
-              </s-stack>
-            </s-stack>
+            <MetricTile
+              icon="gift-card"
+              tone="info"
+              value={data.freeGiftRulesCount}
+              label="Free Gift rules"
+            />
             <s-divider direction="block"></s-divider>
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="package" tone="auto"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{data.mysteryBoxRulesCount}</s-text>
-                <s-text>Mystery Box rules</s-text>
-              </s-stack>
-            </s-stack>
+            <MetricTile
+              icon="product"
+              tone="info"
+              value={data.mysteryBoxRulesCount}
+              label="Mystery Box rules"
+            />
             <s-divider direction="block"></s-divider>
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="check-circle" tone="success"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{data.catalog}</s-text>
-                <s-text>Synced variants</s-text>
-                <s-text color="subdued">{data.selections} selections</s-text>
-              </s-stack>
-            </s-stack>
+            <MetricTile
+              icon="inventory"
+              tone="info"
+              value={data.catalog}
+              label="Synced variants"
+              detail={`${data.selections} selections`}
+            />
           </s-grid>
         </s-section>
 

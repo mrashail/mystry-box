@@ -8,6 +8,7 @@ import {
   deletePromotionDiscount,
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
+import { MetricTile } from "../components/MetricTile";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -41,6 +42,22 @@ export async function loader({ request }: LoaderFunctionArgs) {
     return true;
   };
 
+  // The visible status must agree with what the metric counts as "active".
+  // A rule that is enabled but whose start date is still in the future is
+  // Scheduled, not Active — otherwise the badge says "Active" while the
+  // "Active rules" metric shows 0, which reads as a broken counter.
+  const statusOf = (r: {
+    enabled: boolean;
+    startsAt: Date | null;
+    endsAt: Date | null;
+  }): "active" | "scheduled" | "expired" | "disabled" => {
+    if (!r.enabled) return "disabled";
+    const now = new Date();
+    if (r.startsAt && r.startsAt > now) return "scheduled";
+    if (r.endsAt && r.endsAt < now) return "expired";
+    return "active";
+  };
+
   const activeGifts = gifts.filter(active).length;
   const activeBoxes = mysteries.filter(active).length;
 
@@ -64,6 +81,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       type: "GIFT" as const,
       typeName: "Free Gift",
       enabled: item.enabled,
+      status: statusOf(item),
       priority: item.priority,
       startsAt: item.startsAt,
       endsAt: item.endsAt,
@@ -92,6 +110,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         type: "MYSTERY" as const,
         typeName: isBogo ? "Mystery Box BOGO" : "Mystery Box",
         enabled: item.enabled,
+        status: statusOf(item),
         priority: item.priority,
         startsAt: item.startsAt,
         endsAt: item.endsAt,
@@ -283,7 +302,7 @@ export default function UnifiedRules() {
           </p>
         </div>
         <div className="hero-stat" style={{ borderLeftColor: "rgba(58, 109, 122, 0.16)" }}>
-          <strong>{rules.filter((rule) => rule.enabled).length}</strong>
+          <strong>{metrics.totalActive}</strong>
           <span style={{ color: "#567b84" }}>active rules</span>
         </div>
       </div>
@@ -311,40 +330,36 @@ export default function UnifiedRules() {
         )}
 
         <s-section padding="base">
-          <s-grid gridTemplateColumns="1fr auto 1fr auto 1fr auto 1fr" gap="base" alignItems="center">
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="check-circle" tone="success"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{metrics.totalActive}</s-text>
-                <s-text>Active rules</s-text>
-                <s-text color="subdued">{metrics.totalDisabled} disabled</s-text>
-              </s-stack>
-            </s-stack>
+          <s-grid gridTemplateColumns="1fr auto 1fr auto 1fr auto 1fr" gap="large" alignItems="center">
+            <MetricTile
+              icon="check-circle"
+              tone="success"
+              value={metrics.totalActive}
+              label="Active rules"
+              detail={`${metrics.totalDisabled} disabled`}
+            />
             <s-divider direction="block"></s-divider>
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="gift-card" tone="auto"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{metrics.freeGiftRulesCount}</s-text>
-                <s-text>Free Gift rules</s-text>
-              </s-stack>
-            </s-stack>
+            <MetricTile
+              icon="gift-card"
+              tone="info"
+              value={metrics.freeGiftRulesCount}
+              label="Free Gift rules"
+            />
             <s-divider direction="block"></s-divider>
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="package" tone="auto"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{metrics.mysteryBoxRulesCount}</s-text>
-                <s-text>Mystery Box rules</s-text>
-              </s-stack>
-            </s-stack>
+            <MetricTile
+              icon="product"
+              tone="info"
+              value={metrics.mysteryBoxRulesCount}
+              label="Mystery Box rules"
+            />
             <s-divider direction="block"></s-divider>
-            <s-stack direction="inline" gap="base" alignItems="start">
-              <s-icon type="check-circle" tone="success"></s-icon>
-              <s-stack direction="block" gap="small-100">
-                <s-text type="strong">{metrics.catalog}</s-text>
-                <s-text>Synced variants</s-text>
-                <s-text color="subdued">{metrics.selections} selections</s-text>
-              </s-stack>
-            </s-stack>
+            <MetricTile
+              icon="inventory"
+              tone="info"
+              value={metrics.catalog}
+              label="Synced variants"
+              detail={`${metrics.selections} selections`}
+            />
           </s-grid>
         </s-section>
 
@@ -393,8 +408,24 @@ export default function UnifiedRules() {
                         </s-stack>
                       </s-table-cell>
                       <s-table-cell>
-                        <s-badge tone={rule.enabled ? "success" : "neutral"}>
-                          {rule.enabled ? "Active" : "Disabled"}
+                        <s-badge
+                          tone={
+                            rule.status === "active"
+                              ? "success"
+                              : rule.status === "scheduled"
+                                ? "info"
+                                : rule.status === "expired"
+                                  ? "warning"
+                                  : "neutral"
+                          }
+                        >
+                          {rule.status === "active"
+                            ? "Active"
+                            : rule.status === "scheduled"
+                              ? "Scheduled"
+                              : rule.status === "expired"
+                                ? "Expired"
+                                : "Disabled"}
                         </s-badge>
                       </s-table-cell>
                       <s-table-cell>

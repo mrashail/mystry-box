@@ -1,7 +1,7 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
 client_id = "ae17d6066c12d019dcd33ce1eb8a574e"
-application_url = "https://example.com"
+application_url = "https://mystery-box.proxipreview.com"
 embedded = true
 name = "mystery-box"
 
@@ -38,8 +38,11 @@ api_version = "2026-07"
   topics = [ "inventory_levels/update" ]
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [
+  "https://mystery-box.proxipreview.com/auth/callback",
+  "https://mystery-box.proxipreview.com/auth/shopify/callback",
+  "https://mystery-box.proxipreview.com/api/auth/callback",
+]
 
 [build]
-include_config_on_deploy = true
-automatically_update_urls_on_dev = true
+automatically_update_urls_on_dev = false

@@ -7,6 +7,7 @@ import type {
   PriceTier,
 } from "../lib/promotions.types";
 import type { ResolvedSkuVariant } from "../lib/catalog.server";
+import { resourceImage, meaningfulVariantTitle } from "../lib/resource-display";
 
 export interface ChildChoice {
   productId: string;
@@ -58,7 +59,7 @@ function localDate(value?: string | null) {
 // Fixed column widths keep every row in a given list — child pool, matching
 // rules, price tiers — lined up at the same x-position regardless of how
 // long the product title or which fields happen to be visible.
-const CHILD_ROW_GRID = "1fr 90px 40px";
+const CHILD_ROW_GRID = "auto 1fr 90px 40px";
 const RULE_ROW_GRID = "140px 130px 1fr 40px";
 const TIER_ROW_GRID = "120px 1fr 120px 40px";
 
@@ -153,7 +154,7 @@ export function MysteryBoxEditor({
           variantId: variant.id,
           variantTitle: variant.title ?? "Default",
           sku: variant.sku,
-          imageUrl: product.images?.[0]?.originalSrc,
+          imageUrl: resourceImage(product, variant),
           inventoryQuantity: variant.inventoryQuantity,
           available: true,
           weight: 1,
@@ -301,12 +302,20 @@ export function MysteryBoxEditor({
                     borderRadius="base"
                   >
                     <s-grid gridTemplateColumns={CHILD_ROW_GRID} gap="base" alignItems="center">
-                      <s-stack direction="block" gap="small-100">
+                      {child.imageUrl ? (
+                        <s-thumbnail src={child.imageUrl} alt={child.productTitle} size="small"></s-thumbnail>
+                      ) : (
+                        <s-box padding="small-300" background="subdued" borderRadius="base">
+                          <s-icon type="product" tone="auto"></s-icon>
+                        </s-box>
+                      )}
+                      <s-stack direction="block" gap="small-500">
                         <s-text type="strong">{child.productTitle}</s-text>
-                        <s-text color="subdued">
-                          {child.variantTitle}
-                          {child.sku ? ` · ${child.sku}` : ""}
-                        </s-text>
+                        {(() => {
+                          const label = meaningfulVariantTitle(child.productTitle, child.variantTitle);
+                          const detail = [label, child.sku].filter(Boolean).join(" · ");
+                          return detail ? <s-text color="subdued">{detail}</s-text> : null;
+                        })()}
                       </s-stack>
                       <s-number-field
                         label="Weight"
