@@ -1,4 +1,0 @@
-ALTER TABLE "MysteryBox" ADD COLUMN "boxProductId" TEXT;
-ALTER TABLE "MysteryBox" ADD COLUMN "boxVariantId" TEXT;
-ALTER TABLE "MysteryBox" ADD COLUMN "boxPrice" DECIMAL NOT NULL DEFAULT 0;
-ALTER TABLE "MysteryBox" ADD COLUMN "boxImageUrl" TEXT;
