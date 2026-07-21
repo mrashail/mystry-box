@@ -2,7 +2,19 @@
   "use strict";
   var root = (window.Shopify && window.Shopify.routes && window.Shopify.routes.root) || "/";
   var config = document.getElementById("giftlab-cart-engine");
-  if (!config || window.__giftlabLoaded) return;
+  if (!config) return;
+  // A `window`-level flag only blocks re-entry within the same JS realm.
+  // Shopify's app-block loader has been observed to run this script's
+  // top-level code multiple times per page while only ever fetching it once
+  // over the network — each run gets its own fresh `window`, so
+  // `window.__giftlabLoaded` alone never survives to block the next one, and
+  // every run ends up wrapping fetch/XHR again, each independently
+  // triggering its own evaluate() for the same cart action. Every run does
+  // resolve the *same* real `config` DOM node, though, so a flag stored on
+  // that shared element (rather than on `window`) is what actually survives
+  // across whichever mechanism causes the repeat runs.
+  if (config.dataset.giftlabLoaded === "true") return;
+  config.dataset.giftlabLoaded = "true";
   window.__giftlabLoaded = true;
   var running = false;
   var needsReevaluate = false;
@@ -155,7 +167,14 @@
   function updateDOMWithSections(sectionsJson) {
     console.log("GiftLab updating DOM using mutation response sections...");
     var selectors = [
-      "cart-drawer",
+      // Never target the "cart-drawer" wrapper itself (or any other outer
+      // dialog/drawer root element): it contains the click-outside-to-close
+      // overlay as a child, and replacing its innerHTML destroys that overlay
+      // node. The theme's own JS grabs a direct reference to the overlay once
+      // at page load and binds its close handler to that exact node — once we
+      // replace it, the new-look-alike overlay has no listener at all, so
+      // clicking outside the drawer silently does nothing. Only ever touch
+      // the inner content regions (items/summary/footer/bubble) below.
       "#CartDrawer-CartItems",
       "cart-drawer-items",
       ".drawer__cart-items-wrapper",
@@ -211,7 +230,14 @@
   async function refreshCartSections() {
     console.log("GiftLab refreshing cart sections...");
     var selectors = [
-      "cart-drawer",
+      // Never target the "cart-drawer" wrapper itself (or any other outer
+      // dialog/drawer root element): it contains the click-outside-to-close
+      // overlay as a child, and replacing its innerHTML destroys that overlay
+      // node. The theme's own JS grabs a direct reference to the overlay once
+      // at page load and binds its close handler to that exact node — once we
+      // replace it, the new-look-alike overlay has no listener at all, so
+      // clicking outside the drawer silently does nothing. Only ever touch
+      // the inner content regions (items/summary/footer/bubble) below.
       "#CartDrawer-CartItems",
       "cart-drawer-items",
       ".drawer__cart-items-wrapper",

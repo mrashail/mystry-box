@@ -106,7 +106,8 @@ export async function createPromotionDiscount(
   const configErrors = configJson.data?.metafieldsSet?.userErrors ?? [];
   if (configErrors.length || !configJson.data?.metafieldsSet?.metafields?.length) {
     await admin.graphql(
-      `#graphql mutation CleanupGiftLabDiscount($id: ID!) { discountAutomaticDelete(id: $id) { deletedAutomaticDiscountId userErrors { message } } }`,
+      `#graphql
+      mutation CleanupGiftLabDiscount($id: ID!) { discountAutomaticDelete(id: $id) { deletedAutomaticDiscountId userErrors { message } } }`,
       { variables: { id: discountId } },
     );
     throw new Error(
@@ -123,7 +124,8 @@ export async function deletePromotionDiscount(admin: AdminClient, discountId: st
   // because Shopify's side of it is already gone (e.g. removed manually).
   try {
     const response = await admin.graphql(
-      `#graphql mutation DeleteGiftLabDiscount($id: ID!) { discountAutomaticDelete(id: $id) { deletedAutomaticDiscountId userErrors { message } } }`,
+      `#graphql
+      mutation DeleteGiftLabDiscount($id: ID!) { discountAutomaticDelete(id: $id) { deletedAutomaticDiscountId userErrors { message } } }`,
       { variables: { id: discountId } },
     );
     const json = (await response.json()) as {

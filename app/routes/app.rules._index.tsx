@@ -8,6 +8,7 @@ import {
   deletePromotionDiscount,
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
+import { deleteMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { MetricTile } from "../components/MetricTile";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -210,6 +211,10 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (intent === "delete") {
       if (box.shopifyDiscountId) await deletePromotionDiscount(admin, box.shopifyDiscountId);
+      // The shadow product only ever exists to represent this one rule in
+      // cart/checkout — nothing else in the store depends on it, so it should
+      // never outlive the rule it belongs to.
+      if (box.boxProductId) await deleteMysteryBoxProduct(admin, box.boxProductId);
       await prisma.mysteryBox.delete({ where: { id } });
     } else if (intent === "toggle") {
       const enabling = !box.enabled;

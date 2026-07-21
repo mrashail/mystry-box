@@ -132,7 +132,8 @@ export async function syncCatalog(shop: string, admin: AdminClient) {
       let variantPage = product.variants.pageInfo;
       while (variantPage.hasNextPage) {
         const variantResponse = await admin.graphql(
-          `#graphql query CatalogProductVariants($id: ID!, $after: String) { product(id: $id) { variants(first: 250, after: $after) { nodes { id title sku price inventoryQuantity inventoryItem { id } image { url } } pageInfo { hasNextPage endCursor } } } }`,
+          `#graphql
+          query CatalogProductVariants($id: ID!, $after: String) { product(id: $id) { variants(first: 250, after: $after) { nodes { id title sku price inventoryQuantity inventoryItem { id } image { url } } pageInfo { hasNextPage endCursor } } } }`,
           { variables: { id: product.id, after: variantPage.endCursor } },
         );
         const variantJson = (await variantResponse.json()) as {

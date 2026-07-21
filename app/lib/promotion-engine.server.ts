@@ -578,7 +578,18 @@ async function mysteryMutations(
             numericShopifyId(line.variantId) ===
               numericShopifyId(box.parentVariantId))),
     );
-    if (!parentLines.length) continue;
+    if (!parentLines.length) {
+      // The box was removed from the cart. Its earlier hidden pick(s) are
+      // keyed only by (cart.token, box.id, variant), which survives the
+      // removal — so re-adding the same box to the same cart later found the
+      // old MysterySelection row and reused the exact same item every time
+      // instead of rolling again. Clear it now so a future re-add starts
+      // fresh.
+      await prisma.mysterySelection.deleteMany({
+        where: { shop, cartToken: cart.token, mysteryBoxId: box.id, status: "CART" },
+      });
+      continue;
+    }
     parentLines.forEach((line) => claimedParentLines.add(line.key));
     matchedIds.push(box.id);
     const boxRestrictions = (box.restrictions ??

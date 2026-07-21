@@ -119,3 +119,27 @@ export async function syncMysteryBoxProduct(
     boxVariantId: product.variants.nodes[0]?.id ?? null,
   };
 }
+
+// Removes the hidden shadow product a Mystery Box rule created, so deleting
+// the rule doesn't leave an orphaned product sitting in the catalog forever.
+export async function deleteMysteryBoxProduct(admin: AdminClient, productId: string) {
+  try {
+    const response = await admin.graphql(
+      `#graphql
+      mutation DeleteMysteryBoxProduct($input: ProductDeleteInput!) { productDelete(input: $input) { deletedProductId userErrors { field message } } }`,
+      { variables: { input: { id: productId } } },
+    );
+    const json = (await response.json()) as {
+      data?: { productDelete?: { deletedProductId?: string; userErrors: Array<{ message: string }> } };
+    };
+    const errors = json.data?.productDelete?.userErrors ?? [];
+    if (errors.length) {
+      console.warn(
+        `GiftLab: could not delete Mystery Box product ${productId}:`,
+        errors.map((item) => item.message).join(", "),
+      );
+    }
+  } catch (error) {
+    console.warn("GiftLab: exception while deleting Mystery Box product", error);
+  }
+}
