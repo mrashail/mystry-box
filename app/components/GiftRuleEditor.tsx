@@ -454,7 +454,20 @@ export function GiftRuleEditor({
                                 </s-option>
                               ))}
                             </s-select>
-                            {kind === "numeric" ? (
+                            {condition.field === "subtotal" ? (
+                              <s-money-field
+                                label="Value"
+                                labelAccessibilityVisibility="exclusive"
+                                min={0}
+                                value={String(condition.value)}
+                                onChange={(event: any) =>
+                                  updateCondition(index, {
+                                    value: event.target.value,
+                                  })
+                                }
+                                placeholder="0.00"
+                              ></s-money-field>
+                            ) : kind === "numeric" ? (
                               <s-number-field
                                 label="Value"
                                 labelAccessibilityVisibility="exclusive"

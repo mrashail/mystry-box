@@ -52,7 +52,7 @@ s-page {
    gap ourselves rather than leaving mixed-tag pairs flush against
    each other. */
 s-page > *:not([slot]) {
-  margin-block-end: 16px;
+  margin-block-end: 20px;
 }
 s-page > *:not([slot]):last-child {
   margin-block-end: 0;
