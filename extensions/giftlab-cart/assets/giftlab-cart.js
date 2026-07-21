@@ -41,6 +41,14 @@
   }
 
   function syncCartBadges(itemCount) {
+    // Never guess the count. cart/add.js responses omit the cart-level
+    // item_count, and defaulting a missing value to 0 used to flag the whole
+    // drawer as empty (is-empty) even with items present. If we don't have a
+    // real number, leave the server-rendered sections/badge as-is.
+    if (typeof itemCount !== "number" || isNaN(itemCount)) {
+      console.log("GiftLab syncCartBadges skipped — no reliable count:", itemCount);
+      return;
+    }
     console.log("GiftLab syncing cart badges to count:", itemCount);
 
     // Toggle empty cart classes on the drawer element
@@ -233,6 +241,19 @@
     return String(val).split("/").pop();
   }
 
+  // Authoritative cart item_count. Used instead of a mutation response's
+  // item_count because cart/add.js doesn't include it.
+  async function fetchCartItemCount() {
+    try {
+      var resp = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1", "Cache-Control": "no-cache" } });
+      if (resp.ok) {
+        var c = await resp.json();
+        return typeof c.item_count === "number" ? c.item_count : null;
+      }
+    } catch (e) {}
+    return null;
+  }
+
   function matchCondition(cond, cart) {
     if (!cond) return false;
     var actualVal = 0;
@@ -414,7 +435,7 @@
             await refreshCartSections();
           }
           toast(config.dataset.giftMessage || "A free gift has been added to your cart.");
-          syncCartBadges(lastResult.item_count ?? 0);
+          syncCartBadges(await fetchCartItemCount());
         }
         return;
       }
@@ -482,11 +503,7 @@
         }
       }
       toast(message);
-      if (lastResult) {
-        syncCartBadges(lastResult.item_count ?? 0);
-      } else {
-        syncCartBadges(cart.item_count ?? 0);
-      }
+      syncCartBadges(await fetchCartItemCount());
       return;
     } catch (error) {
       console.warn("GiftLab cart evaluation failed with error:", error);
