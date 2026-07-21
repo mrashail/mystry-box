@@ -409,6 +409,56 @@
   // interception relies on this to know it's actually safe to proceed.
   var currentEvaluatePromise = Promise.resolve();
 
+  // This script's top-level code has been observed running multiple times on
+  // a single page load even though the browser fetches the file only once —
+  // each run gets its own `running`/`needsReevaluate` closure, so the
+  // re-entrancy guard above only stops overlapping calls *within* one run.
+  // Two such runs reacting to the same add-to-cart both independently
+  // fetched the cart, computed mutations, and wrote them back — the second
+  // one working from a snapshot taken before the first one's write landed —
+  // and could issue a conflicting mutation against the same line. A
+  // sessionStorage-based lock is used because it's the one thing that stays
+  // shared across whichever mechanism is producing these separate runs, so a
+  // second run waits for the first to actually finish instead of racing it.
+  var EVAL_LOCK_KEY = "giftlab:eval-lock";
+  var EVAL_LOCK_TTL = 15000; // safety net only, in case a run never releases it
+  // runEvaluateCycle's own finally re-enters evaluate()/runEvaluateCycleExclusive
+  // (for the needsReevaluate follow-up) *while this run still holds the lock*
+  // — that's a same-instance re-entry, not a second run racing us, so it must
+  // be let through immediately rather than waiting on itself. This flag is
+  // what tells tryAcquireEvalLock the difference; only the outermost call
+  // actually touches sessionStorage.
+  var holdingEvalLock = false;
+  function tryAcquireEvalLock() {
+    if (holdingEvalLock) return true;
+    try {
+      var raw = sessionStorage.getItem(EVAL_LOCK_KEY);
+      if (raw && Date.now() - Number(raw) < EVAL_LOCK_TTL) return false;
+      sessionStorage.setItem(EVAL_LOCK_KEY, String(Date.now()));
+      holdingEvalLock = true;
+      return true;
+    } catch (e) {
+      return true; // storage unavailable (e.g. private mode) — don't block on it
+    }
+  }
+  function releaseEvalLock() {
+    holdingEvalLock = false;
+    try { sessionStorage.removeItem(EVAL_LOCK_KEY); } catch (e) {}
+  }
+  function waitForEvalLockRelease() {
+    return new Promise(function (resolve) {
+      var start = Date.now();
+      (function poll() {
+        var raw;
+        try { raw = sessionStorage.getItem(EVAL_LOCK_KEY); } catch (e) { raw = null; }
+        var expired = raw && Date.now() - Number(raw) >= EVAL_LOCK_TTL;
+        var timedOut = Date.now() - start >= EVAL_LOCK_TTL;
+        if (!raw || expired || timedOut) resolve();
+        else setTimeout(poll, 60);
+      })();
+    });
+  }
+
   function evaluate() {
     console.log("GiftLab evaluate() called. Running state:", running);
     if (running) {
@@ -417,8 +467,26 @@
     }
     running = true;
     needsReevaluate = false;
-    currentEvaluatePromise = runEvaluateCycle();
+    currentEvaluatePromise = runEvaluateCycleExclusive();
     return currentEvaluatePromise;
+  }
+
+  async function runEvaluateCycleExclusive() {
+    if (!tryAcquireEvalLock()) {
+      // Another (likely duplicate) run is already mid-cycle for this same
+      // cart change. Wait for it to finish rather than redoing the same work
+      // from a stale snapshot — it will produce the correct settled state.
+      console.log("GiftLab: another evaluate cycle is already in flight, waiting for it instead of racing it...");
+      await waitForEvalLockRelease();
+      running = false;
+      if (needsReevaluate) return evaluate();
+      return;
+    }
+    try {
+      await runEvaluateCycle();
+    } finally {
+      releaseEvalLock();
+    }
   }
 
   async function runEvaluateCycle() {
