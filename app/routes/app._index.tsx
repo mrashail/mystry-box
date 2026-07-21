@@ -87,10 +87,10 @@ export default function Dashboard() {
 
   return (
     <s-page heading="Mystery Box dashboard">
-      <s-button slot="primary-action" variant="primary" icon="gift-card" onClick={() => navigate("/app/gifts/new")}>
+      <s-button slot="primary-action" variant="primary" icon="gift-card" accessibilityLabel="Create free gift" onClick={() => navigate("/app/gifts/new")}>
         Create free gift
       </s-button>
-      <s-button slot="secondary-actions" icon="package" onClick={() => navigate("/app/mystery-boxes/new?type=STANDARD")}>
+      <s-button slot="secondary-actions" icon="package" accessibilityLabel="Create mystery box" onClick={() => navigate("/app/mystery-boxes/new?type=STANDARD")}>
         Create mystery box
       </s-button>
 

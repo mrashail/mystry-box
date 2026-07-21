@@ -368,10 +368,10 @@ export default function UnifiedRules() {
             <s-stack direction="inline" gap="base" alignItems="center" justifyContent="space-between">
               <s-text color="subdued">{rules.length} total rule{rules.length === 1 ? "" : "s"}</s-text>
               <s-stack direction="inline" gap="small-300">
-                <s-button icon="package" onClick={() => navigate("/app/mystery-boxes/new?type=STANDARD")}>
+                <s-button icon="package" accessibilityLabel="Create mystery box" onClick={() => navigate("/app/mystery-boxes/new?type=STANDARD")}>
                   Create mystery box
                 </s-button>
-                <s-button variant="primary" icon="gift-card" onClick={() => navigate("/app/gifts/new")}>
+                <s-button variant="primary" icon="gift-card" accessibilityLabel="Create free gift" onClick={() => navigate("/app/gifts/new")}>
                   Create free gift
                 </s-button>
               </s-stack>
@@ -442,7 +442,7 @@ export default function UnifiedRules() {
                             <input type="hidden" name="id" value={rule.id} />
                             <input type="hidden" name="type" value={rule.type} />
                             <input type="hidden" name="intent" value="duplicate" />
-                            <s-button type="submit" icon="duplicate">
+                            <s-button type="submit" icon="duplicate" accessibilityLabel="Duplicate rule">
                               Copy
                             </s-button>
                           </Form>
@@ -450,7 +450,7 @@ export default function UnifiedRules() {
                             <input type="hidden" name="id" value={rule.id} />
                             <input type="hidden" name="type" value={rule.type} />
                             <input type="hidden" name="intent" value="delete" />
-                            <s-button type="submit" tone="critical" icon="delete">
+                            <s-button type="submit" tone="critical" icon="delete" accessibilityLabel="Delete rule">
                               Delete
                             </s-button>
                           </Form>
@@ -468,7 +468,7 @@ export default function UnifiedRules() {
                   <s-text color="subdued">
                     Get started by creating your first Free Gift or Mystery Box promotion to delight customers.
                   </s-text>
-                  <s-button variant="primary" icon="plus" onClick={() => navigate("/app/gifts/new")}>
+                  <s-button variant="primary" icon="plus" accessibilityLabel="Create your first rule" onClick={() => navigate("/app/gifts/new")}>
                     Create your first rule
                   </s-button>
                 </s-stack>

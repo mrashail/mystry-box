@@ -505,6 +505,7 @@ export function GiftRuleEditor({
             <div>
               <s-button
                 icon="plus"
+                accessibilityLabel="Add condition"
                 onClick={() =>
                   setConditions((current) => [
                     ...current,

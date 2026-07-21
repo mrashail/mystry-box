@@ -478,6 +478,7 @@ export function MysteryBoxEditor({
             <div>
               <s-button
                 icon="plus"
+                accessibilityLabel="Add matching rule"
                 onClick={() =>
                   setRules((current) => [
                     ...current,
@@ -584,6 +585,7 @@ export function MysteryBoxEditor({
               <div>
                 <s-button
                   icon="plus"
+                  accessibilityLabel="Add price tier"
                   onClick={() =>
                     setTiers((current) => [
                       ...current,
