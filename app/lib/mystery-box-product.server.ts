@@ -5,10 +5,14 @@ interface AdminClient {
   ) => Promise<Response>;
 }
 
-let onlineStorePublicationId: string | null = null;
+// Keyed by shop: the Online Store publication GID differs per shop, so a
+// single process-wide cache would hand shop A's publication id to shop B and
+// silently fail to publish B's mystery-box product (leaving it unaddable).
+const onlineStorePublicationIdByShop = new Map<string, string>();
 
-async function getOnlineStorePublicationId(admin: AdminClient) {
-  if (onlineStorePublicationId) return onlineStorePublicationId;
+async function getOnlineStorePublicationId(admin: AdminClient, shop: string) {
+  const cached = onlineStorePublicationIdByShop.get(shop);
+  if (cached) return cached;
   const response = await admin.graphql(
     `#graphql
     query OnlineStorePublication { publications(first: 25) { nodes { id catalog { title } } } }`,
@@ -19,8 +23,8 @@ async function getOnlineStorePublicationId(admin: AdminClient) {
   const match = json.data?.publications.nodes.find((node) =>
     node.catalog?.title?.endsWith("for Online Store"),
   );
-  onlineStorePublicationId = match?.id ?? null;
-  return onlineStorePublicationId;
+  if (match?.id) onlineStorePublicationIdByShop.set(shop, match.id);
+  return match?.id ?? null;
 }
 
 // Creates (or updates) the hidden real product that represents a Mystery Box in
@@ -39,6 +43,7 @@ async function getOnlineStorePublicationId(admin: AdminClient) {
 // already in the cart (see pickChildren()/mysteryMutations in promotion-engine).
 export async function syncMysteryBoxProduct(
   admin: AdminClient,
+  shop: string,
   box: {
     boxProductId?: string | null;
     boxVariantId?: string | null;
@@ -100,7 +105,7 @@ export async function syncMysteryBoxProduct(
   // here (e.g. a transient API hiccup), the next save retries it against the same
   // product instead of creating a duplicate.
   try {
-    const publicationId = await getOnlineStorePublicationId(admin);
+    const publicationId = await getOnlineStorePublicationId(admin, shop);
     if (publicationId) {
       await admin.graphql(
         `#graphql

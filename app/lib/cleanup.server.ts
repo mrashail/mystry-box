@@ -9,6 +9,9 @@ export async function deleteShopData(shop: string) {
     prisma.catalogVariant.deleteMany({ where: { shop } }),
     prisma.promotionUsage.deleteMany({ where: { shop } }),
     prisma.mysterySelection.deleteMany({ where: { shop } }),
+    // Holds customerId + received-variant history; must be wiped on uninstall
+    // / shop-redact like every other per-shop table or it leaves orphaned PII.
+    prisma.mysteryCustomerHistory.deleteMany({ where: { shop } }),
     prisma.shopSettings.deleteMany({ where: { shop } }),
     prisma.session.deleteMany({ where: { shop } }),
   ]);

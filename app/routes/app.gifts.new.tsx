@@ -2,7 +2,7 @@ import type { ActionFunctionArgs } from "react-router";
 import { GiftRuleEditor } from "../components/GiftRuleEditor";
 import { checked, dateOrNull, integer, json, prismaJson, text } from "../lib/forms.server";
 import type { GiftChoice, RuleCondition } from "../lib/promotions.types";
-import { createPromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
+import { createPromotionDiscount, deletePromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -30,14 +30,24 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  await prisma.giftRule.create({ data: {
-    shop: session.shop, name, description: text(form, "description") || null,
-    enabled, priority: integer(form, "priority", 100, 1), matchMode: text(form, "matchMode", "ALL"),
-    conditions: prismaJson(json<RuleCondition[]>(form, "conditions", [])), gifts: prismaJson(gifts), allowMultiple: checked(form, "allowMultiple"), maxGifts: integer(form, "maxGifts", 1, 1), stackable: checked(form, "stackable"),
-    startsAt: dateOrNull(form, "startsAt"), endsAt: dateOrNull(form, "endsAt"), notification: text(form, "notification") || null,
-    shopifyDiscountId,
-    restrictions: { onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) },
-  } });
+  try {
+    await prisma.giftRule.create({ data: {
+      shop: session.shop, name, description: text(form, "description") || null,
+      enabled, priority: integer(form, "priority", 100, 1), matchMode: text(form, "matchMode", "ALL"),
+      conditions: prismaJson(json<RuleCondition[]>(form, "conditions", [])), gifts: prismaJson(gifts), allowMultiple: checked(form, "allowMultiple"), maxGifts: integer(form, "maxGifts", 1, 1), stackable: checked(form, "stackable"),
+      startsAt: dateOrNull(form, "startsAt"), endsAt: dateOrNull(form, "endsAt"), notification: text(form, "notification") || null,
+      shopifyDiscountId,
+      restrictions: { onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) },
+    } });
+  } catch (error) {
+    // Don't leave the just-created automatic discount orphaned in Shopify if
+    // the owning rule row never gets written.
+    if (shopifyDiscountId) await deletePromotionDiscount(admin, shopifyDiscountId);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Could not save this rule." },
+      { status: 500 },
+    );
+  }
   return redirect("/app/rules");
 }
 

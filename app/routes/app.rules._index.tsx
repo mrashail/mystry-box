@@ -8,7 +8,7 @@ import {
   deletePromotionDiscount,
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
-import { deleteMysteryBoxProduct } from "../lib/mystery-box-product.server";
+import { deleteMysteryBoxProduct, syncMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { MetricTile } from "../components/MetricTile";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -239,17 +239,43 @@ export async function action({ request }: ActionFunctionArgs) {
       }
       await prisma.mysteryBox.update({ where: { id }, data: { enabled: enabling, shopifyDiscountId } });
     } else if (intent === "duplicate") {
+      const copyName = `${box.name} (copy)`;
+      const isBogo = (box.bogo as { enabled?: boolean } | null)?.enabled;
+      // A standard box's parent line IS its own shadow product, so the copy
+      // needs a brand-new shadow product of its own — reusing the original's
+      // ids would make the copy point at another box's product (and stay
+      // unaddable, since it would have no boxVariantId). BOGO boxes trigger off
+      // a real merchant product, so they don't get a shadow product.
+      let copyBoxProductId: string | null = null;
+      let copyBoxVariantId: string | null = null;
+      let copyParentProductId = box.parentProductId;
+      let copyParentVariantId = box.parentVariantId;
+      let copyParentTitle = box.parentProductTitle;
+      let copyParentVariantTitle = box.parentVariantTitle;
+      if (!isBogo) {
+        const synced = await syncMysteryBoxProduct(admin, session.shop, {
+          name: copyName,
+          boxPrice: Number(box.boxPrice),
+          boxImageUrl: box.boxImageUrl,
+        });
+        copyBoxProductId = synced.boxProductId;
+        copyBoxVariantId = synced.boxVariantId;
+        copyParentProductId = synced.boxProductId;
+        copyParentVariantId = synced.boxVariantId;
+        copyParentTitle = copyName;
+        copyParentVariantTitle = "Default Title";
+      }
       await prisma.mysteryBox.create({
         data: {
           shop: session.shop,
-          name: `${box.name} (copy)`,
+          name: copyName,
           description: box.description,
           enabled: false,
           priority: box.priority,
-          parentProductId: box.parentProductId,
-          parentProductTitle: box.parentProductTitle,
-          parentVariantId: box.parentVariantId,
-          parentVariantTitle: box.parentVariantTitle,
+          parentProductId: copyParentProductId,
+          parentProductTitle: copyParentTitle,
+          parentVariantId: copyParentVariantId,
+          parentVariantTitle: copyParentVariantTitle,
           selectionMethod: box.selectionMethod,
           inventoryBehavior: box.inventoryBehavior,
           selectionCount: box.selectionCount,
@@ -258,6 +284,8 @@ export async function action({ request }: ActionFunctionArgs) {
           priceTiers: prismaJson(box.priceTiers),
           bogo: prismaJson(box.bogo),
           restrictions: prismaJson(box.restrictions),
+          boxProductId: copyBoxProductId,
+          boxVariantId: copyBoxVariantId,
           boxPrice: box.boxPrice,
           boxImageUrl: box.boxImageUrl,
           startsAt: box.startsAt,

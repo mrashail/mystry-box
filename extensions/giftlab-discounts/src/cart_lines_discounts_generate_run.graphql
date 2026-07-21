@@ -17,6 +17,7 @@ query Input {
       freeGiftRule: attribute(key: "_free_gift_rule") { value }
       freeGiftDiscountType: attribute(key: "_free_gift_discount_type") { value }
       freeGiftDiscountValue: attribute(key: "_free_gift_discount_value") { value }
+      freeGiftQty: attribute(key: "_free_gift_qty") { value }
       freeGiftName: attribute(key: "_free_gift_name") { value }
       freeGiftConditions: attribute(key: "_free_gift_conditions") { value }
       freeGiftUnverifiable: attribute(key: "_free_gift_unverifiable") { value }

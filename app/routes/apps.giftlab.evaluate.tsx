@@ -45,11 +45,16 @@ export async function action({ request }: ActionFunctionArgs) {
   const shop = context.session?.shop ?? url.searchParams.get("shop");
   if (!shop)
     return Response.json({ error: "Missing shop context" }, { status: 401 });
-  const payload = (await request.json()) as {
+  let payload: {
     cart?: AjaxCart;
     customer?: CartSnapshot["customer"];
     country?: string;
   };
+  try {
+    payload = await request.json();
+  } catch {
+    return Response.json({ error: "Invalid request body" }, { status: 400 });
+  }
   const cart = payload.cart;
   if (!cart?.items)
     return Response.json({ error: "Invalid cart" }, { status: 400 });
@@ -140,16 +145,20 @@ export async function loader({ request }: LoaderFunctionArgs) {
       const variantId = numericShopifyId(gift.variantId);
       const discountType = gift.discountType || "FREE";
       const discountValue = gift.discountValue || 100.0;
+      const quantity = Math.max(1, gift.quantity || 1);
+      // Quantity is part of the signed payload (see desiredGiftMutations in
+      // promotion-engine.server.ts) so the checkout Function only discounts
+      // the awarded number of units, not an AJAX-inflated line quantity.
       const signature = promotionSignature(
         secret,
         variantId,
         "free_gift_discount",
         rule.id,
-        `${discountType}|${discountValue}|${unverifiable ? "UNVERIFIABLE" : conditionsBlob}`
+        `${discountType}|${discountValue}|${quantity}|${unverifiable ? "UNVERIFIABLE" : conditionsBlob}`
       );
       return {
         variantId,
-        quantity: gift.quantity || 1,
+        quantity,
         discountType,
         discountValue,
         signature,

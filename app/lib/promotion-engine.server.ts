@@ -325,6 +325,11 @@ function desiredGiftMutations(
         _promotion_kind: "free_gift",
         _free_gift_discount_type: discountType,
         _free_gift_discount_value: String(discountValue),
+        // The awarded quantity is bound into the signature so a shopper can't
+        // raise the gift line's quantity via the cart AJAX API (which keeps
+        // the signed properties) and have the checkout Function discount all
+        // of the inflated units — the Function only discounts this many.
+        _free_gift_qty: String(desiredQuantity),
         _free_gift_name: rule.name,
         ...(unverifiable
           ? { _free_gift_unverifiable: "true" }
@@ -334,7 +339,7 @@ function desiredGiftMutations(
           variantId,
           "free_gift_discount",
           rule.id,
-          `${discountType}|${discountValue}|${unverifiable ? "UNVERIFIABLE" : conditionsBlob}`,
+          `${discountType}|${discountValue}|${desiredQuantity}|${unverifiable ? "UNVERIFIABLE" : conditionsBlob}`,
         ),
         "Free gift": rule.name,
       };
@@ -409,7 +414,7 @@ function chooseWeighted<T extends { weight?: number }>(items: T[]) {
   return items[0];
 }
 
-function pickChildren(
+export function pickChildren(
   box: BoxWithChildren,
   count: number,
   customPool?: MysteryBoxChild[],
@@ -443,29 +448,38 @@ function pickChildren(
   const method = overrideMethod || box.selectionMethod;
   const selected: MysteryBoxChild[] = [];
   for (let index = 0; index < count; index += 1) {
-    const pool = box.allowDuplicateChoices
-      ? candidates
-      : candidates.filter(
-          (candidate) =>
-            !selected.some((item) => item.variantId === candidate.variantId),
-        );
-    if (!pool.length) break;
     let child: MysteryBoxChild;
-    if (method === "WEIGHTED") child = chooseWeighted(pool);
-    else if (method === "HIGHEST_INVENTORY")
-      child = [...pool].sort(
-        (a, b) => (b.inventoryQuantity ?? 0) - (a.inventoryQuantity ?? 0),
-      )[0];
-    else if (method === "LOWEST_INVENTORY")
-      child = [...pool].sort(
-        (a, b) => (a.inventoryQuantity ?? 0) - (b.inventoryQuantity ?? 0),
-      )[0];
-    else if (
-      method === "SEQUENTIAL" ||
-      method === "ROUND_ROBIN"
-    )
-      child = pool[(box.cursor + index) % pool.length];
-    else child = pool[randomInt(pool.length)];
+    if (method === "SEQUENTIAL" || method === "ROUND_ROBIN") {
+      // Walk the full candidate list from the persisted cursor, taking
+      // consecutive items. Indexing the whole list (not a pool that shrinks
+      // as items are picked) is what keeps the sequence contiguous —
+      // A,B,C… — instead of skipping every other entry, and because
+      // `candidates` has no duplicate variants, consecutive indices are
+      // already distinct until the list wraps.
+      if (!candidates.length) break;
+      child = candidates[(box.cursor + index) % candidates.length];
+    } else {
+      // Random / weighted / inventory-ranked: draw from a pool that excludes
+      // what's already been picked this round (unless duplicates are allowed),
+      // so the same variant isn't chosen twice.
+      const pool = box.allowDuplicateChoices
+        ? candidates
+        : candidates.filter(
+            (candidate) =>
+              !selected.some((item) => item.variantId === candidate.variantId),
+          );
+      if (!pool.length) break;
+      if (method === "WEIGHTED") child = chooseWeighted(pool);
+      else if (method === "HIGHEST_INVENTORY")
+        child = [...pool].sort(
+          (a, b) => (b.inventoryQuantity ?? 0) - (a.inventoryQuantity ?? 0),
+        )[0];
+      else if (method === "LOWEST_INVENTORY")
+        child = [...pool].sort(
+          (a, b) => (a.inventoryQuantity ?? 0) - (b.inventoryQuantity ?? 0),
+        )[0];
+      else child = pool[randomInt(pool.length)];
+    }
     selected.push(child);
   }
   return selected;
@@ -632,32 +646,49 @@ async function mysteryMutations(
         },
       });
       const rewardCount = bogoRewardCount(bogo, parent.quantity);
-      const baseCount = !bogo.enabled ? Math.max(1, box.selectionCount) * parent.quantity : 0;
+      // When "one per order" caps the visible/charged box to a single unit,
+      // only one box's worth of hidden contents must be picked — multiplying
+      // by the full parent quantity here would record (and ship) N items for
+      // the one box the shopper actually pays for.
+      const effectiveParentQty = boxRestrictions.onePerOrder
+        ? Math.min(1, parent.quantity)
+        : parent.quantity;
+      const baseCount = !bogo.enabled
+        ? Math.max(1, box.selectionCount) * effectiveParentQty
+        : 0;
       const shouldReselect =
         !existing || existing.selectionQuantity !== parent.quantity;
+      const boxIsSequential =
+        box.selectionMethod === "SEQUENTIAL" ||
+        box.selectionMethod === "ROUND_ROBIN";
 
-      const selectedIds = shouldReselect
-        ? [
-            ...(!bogo.enabled
-              ? pickChildren(
-                  box,
-                  baseCount,
-                  box.children,
-                  undefined,
-                  customerHistory.get(box.id),
-                )
-              : []),
-            ...(rewardCount && targetBox
-              ? pickChildren(
-                  targetBox,
-                  rewardCount,
-                  targetBox.children,
-                  bogo.randomizeGifts ? "RANDOM" : targetBox.selectionMethod,
-                  customerHistory.get(targetBox.id),
-                )
-              : []),
-          ].map((child) => child.variantId)
-        : asArray<string>(existing.selectedVariants);
+      let selectedIds: string[];
+      let baseDrawn = 0;
+      if (shouldReselect) {
+        const basePicks = !bogo.enabled
+          ? pickChildren(
+              box,
+              baseCount,
+              box.children,
+              undefined,
+              customerHistory.get(box.id),
+            )
+          : [];
+        const rewardPicks =
+          rewardCount && targetBox
+            ? pickChildren(
+                targetBox,
+                rewardCount,
+                targetBox.children,
+                bogo.randomizeGifts ? "RANDOM" : targetBox.selectionMethod,
+                customerHistory.get(targetBox.id),
+              )
+            : [];
+        baseDrawn = basePicks.length;
+        selectedIds = [...basePicks, ...rewardPicks].map((child) => child.variantId);
+      } else {
+        selectedIds = asArray<string>(existing.selectedVariants);
+      }
 
       if (!existing && selectedIds.length) {
         await prisma.mysterySelection.create({
@@ -670,15 +701,6 @@ async function mysteryMutations(
             selectionQuantity: parent.quantity,
           },
         });
-        if (
-          box.selectionMethod === "SEQUENTIAL" ||
-          box.selectionMethod === "ROUND_ROBIN"
-        ) {
-          await prisma.mysteryBox.update({
-            where: { id: box.id },
-            data: { cursor: { increment: selectedIds.length } },
-          });
-        }
       } else if (existing && shouldReselect) {
         await prisma.mysterySelection.update({
           where: { id: existing.id },
@@ -687,6 +709,19 @@ async function mysteryMutations(
             selectionQuantity: parent.quantity,
           },
         });
+      }
+
+      // Advance the sequential cursor whenever fresh base picks were actually
+      // drawn — on first creation AND on a re-roll (quantity change). Only
+      // incrementing on creation left the cursor frozen after any re-roll, so
+      // the "sequential" rotation stalled and repeated the same items. Advance
+      // by the number of base picks (not reward picks), keyed to this box.
+      if (shouldReselect && boxIsSequential && baseDrawn > 0) {
+        await prisma.mysteryBox.update({
+          where: { id: box.id },
+          data: { cursor: { increment: baseDrawn } },
+        });
+        box.cursor += baseDrawn;
       }
 
       if (!bogo.enabled) {

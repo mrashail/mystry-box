@@ -64,7 +64,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
 
   // Always a single hidden variant, regardless of how many items are in the
   // pool — the real per-child data never becomes a storefront-visible option.
-  const { boxProductId, boxVariantId } = await syncMysteryBoxProduct(admin, {
+  const { boxProductId, boxVariantId } = await syncMysteryBoxProduct(admin, session.shop, {
     boxProductId: box.boxProductId,
     boxVariantId: box.boxVariantId,
     name: parsed.data.name,

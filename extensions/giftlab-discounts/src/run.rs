@@ -234,14 +234,17 @@ fn cart_lines_discounts_generate_run(
             let discount_value = discount_value_str.parse::<f64>().unwrap_or(100.0);
             let unverifiable = line.free_gift_unverifiable().and_then(|value| value.value()).map(String::as_str) == Some("true");
             let conditions_blob = line.free_gift_conditions().and_then(|value| value.value()).map(String::as_str);
+            // The awarded quantity is part of the signed payload. Using the raw
+            // property string (not a reparsed number) keeps the reconstructed
+            // payload byte-identical to what the engine signed.
+            let awarded_qty_str = line.free_gift_qty().and_then(|value| value.value()).map(String::as_str).unwrap_or("1");
+            let awarded_qty = awarded_qty_str.parse::<i32>().unwrap_or(1).max(1);
 
-            // New signed payload layout: variantId | "free_gift_discount" | ruleId | "discount_type|discount_value|conditions"
+            // Signed payload: variantId|free_gift_discount|ruleId|type|value|qty|conditions
             let conditions_component = if unverifiable { "UNVERIFIABLE" } else { conditions_blob.unwrap_or("") };
-            let new_payload = format!("{variant_id}|free_gift_discount|{free_gift_id}|{discount_type}|{discount_value_str}|{conditions_component}");
-            // Legacy signed payload layout: variantId | "free_gift" | ruleId
-            let legacy_payload = format!("{variant_id}|free_gift|{free_gift_id}");
+            let payload = format!("{variant_id}|free_gift_discount|{free_gift_id}|{discount_type}|{discount_value_str}|{awarded_qty_str}|{conditions_component}");
 
-            if valid_signature(secret, &new_payload, signature) {
+            if valid_signature(secret, &payload, signature) {
                 // Re-check the rule's trigger conditions against the *current*
                 // cart, independent of the signature: a shopper who removed the
                 // triggering product and jumped straight to checkout (skipping
@@ -254,22 +257,22 @@ fn cart_lines_discounts_generate_run(
                 if !conditions_ok {
                     continue;
                 }
+                // Only discount the awarded number of units. If the shopper
+                // inflated the gift line's quantity via the cart AJAX API, the
+                // extra units above the signed quantity are charged in full.
+                let target_qty = awarded_qty.min(*line.quantity());
                 let message = free_gift_name.unwrap_or("Free gift");
                 match discount_type {
                     "PERCENT_OFF" => {
-                        candidates.push(percentage_candidate(line.id().to_string(), *line.quantity(), discount_value.min(100.0), message));
+                        candidates.push(percentage_candidate(line.id().to_string(), target_qty, discount_value.min(100.0), message));
                     }
                     "FIXED_OFF" => {
-                        candidates.push(fixed_candidate(line.id().to_string(), *line.quantity(), discount_value, message));
+                        candidates.push(fixed_candidate(line.id().to_string(), target_qty, discount_value, message));
                     }
                     _ => {
-                        candidates.push(percentage_candidate(line.id().to_string(), *line.quantity(), 100.0, message));
+                        candidates.push(percentage_candidate(line.id().to_string(), target_qty, 100.0, message));
                     }
                 }
-                continue;
-            } else if valid_signature(secret, &legacy_payload, signature) {
-                let message = free_gift_name.unwrap_or("Free gift");
-                candidates.push(percentage_candidate(line.id().to_string(), *line.quantity(), 100.0, message));
                 continue;
             }
         }
@@ -284,15 +287,15 @@ fn cart_lines_discounts_generate_run(
                 .and_then(|value| value.value())
                 .and_then(|value| value.parse::<i32>().ok())
                 .unwrap_or(1);
+            // Kind is hard-coded to match exactly what the engine signs
+            // (promotion-engine.server.ts signs "mystery_box_bonus", while the
+            // line's _promotion_kind property is "mystery_box"); reconstructing
+            // from the property would never verify.
             let payload = format!(
-                "{variant_id}|{promotion_kind}|{promotion_id}|{}|{trigger_variant_id}|{trigger_min_qty}",
+                "{variant_id}|mystery_box_bonus|{promotion_id}|{}|{trigger_variant_id}|{trigger_min_qty}",
                 trigger_product_id.unwrap_or(""),
             );
-            // Older lines signed before this trigger check existed won't match
-            // the new payload; fall back to the original (pre-fix) payload so
-            // they don't break mid-rollout — the very next cart evaluation
-            // re-signs them with the new format anyway.
-            let legacy_payload = format!("{variant_id}|{promotion_kind}|{promotion_id}");
+            let _ = promotion_kind;
             if valid_signature(secret, &payload, signature) {
                 let trigger_ok = trigger_product_id
                     .map(|product_id| trigger_present(&ctx, product_id, trigger_variant_id, trigger_min_qty))
@@ -303,10 +306,6 @@ fn cart_lines_discounts_generate_run(
                 let message = mystery_reward_name.unwrap_or("Included with Mystery Box");
                 candidates.push(percentage_candidate(line.id().to_string(), *line.quantity(), 100.0, message));
                 continue;
-            } else if valid_signature(secret, &legacy_payload, signature) {
-                let message = mystery_reward_name.unwrap_or("Included with Mystery Box");
-                candidates.push(percentage_candidate(line.id().to_string(), *line.quantity(), 100.0, message));
-                continue;
             }
         }
 
@@ -314,22 +313,24 @@ fn cart_lines_discounts_generate_run(
             continue;
         }
         let price_type = line.price_type().and_then(|value| value.value()).map(String::as_str).unwrap_or("");
-        let configured = line.price_value().and_then(|value| value.value()).and_then(|value| value.parse::<f64>().ok());
-        let Some(configured) = configured.filter(|value| *value >= 0.0) else { continue };
+        // Keep the raw property string for the signed payload (so it stays
+        // byte-identical to what the engine signed via String(tier.value)),
+        // and parse a separate f64 only for the discount arithmetic.
+        let configured_str = line.price_value().and_then(|value| value.value()).map(String::as_str).unwrap_or("");
+        let Some(configured) = configured_str.parse::<f64>().ok().filter(|value| *value >= 0.0) else { continue };
         let pricing_box = line.pricing_box().and_then(|value| value.value()).map(String::as_str).unwrap_or("");
         let trigger_product_id = line.mystery_trigger_product_id().and_then(|value| value.value()).map(String::as_str);
         let trigger_variant_id = line.mystery_trigger_variant_id().and_then(|value| value.value()).map(String::as_str).unwrap_or("");
         let price_payload = format!(
-            "{variant_id}|price|{pricing_box}|{price_type}|{configured}|{}|{trigger_variant_id}",
+            "{variant_id}|price|{pricing_box}|{price_type}|{configured_str}|{}|{trigger_variant_id}",
             trigger_product_id.unwrap_or(""),
         );
-        let legacy_price_payload = format!("{variant_id}|price|{pricing_box}|{price_type}|{configured}");
-        let signed_new = valid_signature(secret, &price_payload, signature);
-        let signed_legacy = !signed_new && valid_signature(secret, &legacy_price_payload, signature);
-        if !signed_new && !signed_legacy {
+        if !valid_signature(secret, &price_payload, signature) {
             continue;
         }
-        if signed_new {
+        // The quantity-tier discount only holds while the triggering parent
+        // product is still in the cart, re-checked independently of the sig.
+        {
             let trigger_ok = trigger_product_id
                 .map(|product_id| trigger_present(&ctx, product_id, trigger_variant_id, 1))
                 .unwrap_or(true);
@@ -403,6 +404,32 @@ mod tests {
     fn rejects_missing_or_malformed_signatures() {
         assert!(!valid_signature("fixture-secret", "payload", None));
         assert!(!valid_signature("fixture-secret", "payload", Some("not-hex")));
+    }
+
+    fn sign(secret: &str, payload: &str) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload.as_bytes());
+        mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn free_gift_signature_binds_awarded_quantity() {
+        // A signature earned for quantity 1 must not verify against a payload
+        // claiming quantity 5 — so a shopper who inflates the gift line's
+        // quantity can't have the extra units discounted.
+        let secret = "fixture-secret";
+        let signed_for_one =
+            sign(secret, "111|free_gift_discount|rule-1|FREE|100|1|ALL|");
+        assert!(valid_signature(
+            secret,
+            "111|free_gift_discount|rule-1|FREE|100|1|ALL|",
+            Some(&signed_for_one),
+        ));
+        assert!(!valid_signature(
+            secret,
+            "111|free_gift_discount|rule-1|FREE|100|5|ALL|",
+            Some(&signed_for_one),
+        ));
     }
 
     #[test]

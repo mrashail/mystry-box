@@ -2,8 +2,8 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useSearchParams } from "react-router";
 import { MysteryBoxEditor } from "../components/MysteryBoxEditor";
 import { mysteryFormData } from "../lib/forms.server";
-import { syncMysteryBoxProduct } from "../lib/mystery-box-product.server";
-import { createPromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
+import { syncMysteryBoxProduct, deleteMysteryBoxProduct } from "../lib/mystery-box-product.server";
+import { createPromotionDiscount, deletePromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -28,7 +28,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   // Automatically create or sync Mystery Box product in Shopify — always a
   // single hidden variant, regardless of how many items are in the pool.
-  const { boxProductId, boxVariantId } = await syncMysteryBoxProduct(admin, {
+  const { boxProductId, boxVariantId } = await syncMysteryBoxProduct(admin, session.shop, {
     name: parsed.data.name,
     boxPrice: parsed.data.boxPrice,
     boxImageUrl: parsed.data.boxImageUrl,
@@ -48,6 +48,10 @@ export async function action({ request }: ActionFunctionArgs) {
         secret,
       });
     } catch (error) {
+      // The shadow product was already created above; don't leave it orphaned
+      // in the catalog when the discount step fails (e.g. Function not yet
+      // deployed) — every retry would otherwise pile up another dead product.
+      if (boxProductId) await deleteMysteryBoxProduct(admin, boxProductId);
       return Response.json(
         { error: error instanceof Error ? error.message : "Could not activate the checkout discount for this box." },
         { status: 400 },
@@ -55,33 +59,44 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
-  await prisma.mysteryBox.create({
-    data: {
-      shop: session.shop,
-      ...parsed.data,
-      parentProductId: finalParentId,
-      parentProductTitle: finalParentTitle,
-      parentVariantId: finalParentVariantId,
-      parentVariantTitle: finalParentVariantTitle,
-      boxProductId,
-      boxVariantId,
-      shopifyDiscountId,
-      children: {
-        create: parsed.children.map((child, position) => ({
-          productId: child.productId,
-          productTitle: child.productTitle,
-          variantId: child.variantId,
-          variantTitle: child.variantTitle,
-          sku: child.sku || null,
-          imageUrl: child.imageUrl || null,
-          inventoryQuantity: child.inventoryQuantity ?? null,
-          available: child.available ?? true,
-          weight: child.weight ?? 1,
-          position,
-        })),
+  try {
+    await prisma.mysteryBox.create({
+      data: {
+        shop: session.shop,
+        ...parsed.data,
+        parentProductId: finalParentId,
+        parentProductTitle: finalParentTitle,
+        parentVariantId: finalParentVariantId,
+        parentVariantTitle: finalParentVariantTitle,
+        boxProductId,
+        boxVariantId,
+        shopifyDiscountId,
+        children: {
+          create: parsed.children.map((child, position) => ({
+            productId: child.productId,
+            productTitle: child.productTitle,
+            variantId: child.variantId,
+            variantTitle: child.variantTitle,
+            sku: child.sku || null,
+            imageUrl: child.imageUrl || null,
+            inventoryQuantity: child.inventoryQuantity ?? null,
+            available: child.available ?? true,
+            weight: child.weight ?? 1,
+            position,
+          })),
+        },
       },
-    },
-  });
+    });
+  } catch (error) {
+    // Roll back the Shopify-side resources so a failed DB insert can't strand
+    // an orphan product + discount that no rule row owns.
+    if (shopifyDiscountId) await deletePromotionDiscount(admin, shopifyDiscountId);
+    if (boxProductId) await deleteMysteryBoxProduct(admin, boxProductId);
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Could not save this mystery box." },
+      { status: 500 },
+    );
+  }
   return redirect("/app/rules");
 }
 

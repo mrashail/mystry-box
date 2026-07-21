@@ -366,6 +366,10 @@
             _promotion_kind: "free_gift",
             _free_gift_discount_type: gift.discountType,
             _free_gift_discount_value: String(gift.discountValue),
+            // Signed awarded quantity (must match gift.quantity, which the
+            // app-proxy loader baked into gift.signature) so the checkout
+            // Function only discounts this many units.
+            _free_gift_qty: String(gift.quantity),
             _free_gift_name: rule.name,
             _promotion_signature: gift.signature,
             "Free gift": rule.name
@@ -421,7 +425,7 @@
   // shared across whichever mechanism is producing these separate runs, so a
   // second run waits for the first to actually finish instead of racing it.
   var EVAL_LOCK_KEY = "giftlab:eval-lock";
-  var EVAL_LOCK_TTL = 15000; // safety net only, in case a run never releases it
+  var EVAL_LOCK_TTL = 8000; // safety net only, in case a run never releases it
   // runEvaluateCycle's own finally re-enters evaluate()/runEvaluateCycleExclusive
   // (for the needsReevaluate follow-up) *while this run still holds the lock*
   // — that's a same-instance re-entry, not a second run racing us, so it must
@@ -445,6 +449,11 @@
     holdingEvalLock = false;
     try { sessionStorage.removeItem(EVAL_LOCK_KEY); } catch (e) {}
   }
+  // If the page is torn down mid-cycle, drop our lock so the next page load
+  // isn't made to wait out the full TTL before it can evaluate.
+  window.addEventListener("pagehide", function () {
+    if (holdingEvalLock) releaseEvalLock();
+  });
   function waitForEvalLockRelease() {
     return new Promise(function (resolve) {
       var start = Date.now();
@@ -473,14 +482,16 @@
 
   async function runEvaluateCycleExclusive() {
     if (!tryAcquireEvalLock()) {
-      // Another (likely duplicate) run is already mid-cycle for this same
-      // cart change. Wait for it to finish rather than redoing the same work
-      // from a stale snapshot — it will produce the correct settled state.
-      console.log("GiftLab: another evaluate cycle is already in flight, waiting for it instead of racing it...");
+      // Another run holds the lock. Wait for it to finish, then run our own
+      // cycle anyway (the cart may have changed again since it started, and a
+      // second evaluate is idempotent — it finds no mutations if nothing
+      // changed). Crucially we do NOT skip after waiting: a lock stranded by a
+      // page that unloaded mid-cycle must never permanently suppress the next
+      // page's evaluation. Once the wait resolves we (best-effort) take the
+      // lock and proceed.
+      console.log("GiftLab: another evaluate cycle is in flight, waiting for it to settle...");
       await waitForEvalLockRelease();
-      running = false;
-      if (needsReevaluate) return evaluate();
-      return;
+      tryAcquireEvalLock();
     }
     try {
       await runEvaluateCycle();
@@ -727,31 +738,29 @@
     });
   }, true);
 
+  function init() {
+    rulesLoadPromise = loadRulesAndCart();
+    rulesLoadPromise.then(function () { evaluate(); });
+  }
+
   var pendingToast = sessionStorage.getItem(TOAST_KEY);
   if (pendingToast) {
     sessionStorage.removeItem(TOAST_KEY);
     document.addEventListener("DOMContentLoaded", function () { toast(pendingToast); });
   }
-  document.addEventListener("DOMContentLoaded", function() {
-    rulesLoadPromise = loadRulesAndCart();
-    rulesLoadPromise.then(function() {
-      evaluate();
-    });
-  });
   document.addEventListener("cart:updated", function (event) {
     if (event && event.detail && event.detail.source === "giftlab") return;
     console.log("GiftLab: cart:updated event received. Re-evaluating...");
     evaluate();
   });
-  window.addEventListener("pageshow", function() {
-    rulesLoadPromise = loadRulesAndCart();
-    rulesLoadPromise.then(function() {
-      evaluate();
-    });
+  // Only re-initialize on an actual back/forward-cache restore; a normal fresh
+  // load is handled by the single immediate init below. This avoids firing
+  // three redundant rule/cart loads (immediate + DOMContentLoaded + pageshow)
+  // on every pageview.
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) init();
   });
-  
-  rulesLoadPromise = loadRulesAndCart();
-  rulesLoadPromise.then(function() {
-    evaluate();
-  });
+
+  // Single initial run for this pageview.
+  init();
 })();

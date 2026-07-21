@@ -8,12 +8,18 @@ export function text(form: FormData, key: string, fallback = "") {
 }
 
 export function integer(form: FormData, key: string, fallback: number, min = 0) {
-  const value = Number(text(form, key));
+  const raw = text(form, key);
+  // Number("") is 0 (finite), which would silently resolve a blank field to
+  // `min` instead of the intended default — treat empty as "use fallback".
+  if (raw === "") return fallback;
+  const value = Number(raw);
   return Number.isFinite(value) ? Math.max(min, Math.floor(value)) : fallback;
 }
 
 export function decimal(form: FormData, key: string, fallback: number, min = 0) {
-  const value = Number(text(form, key));
+  const raw = text(form, key);
+  if (raw === "") return fallback;
+  const value = Number(raw);
   return Number.isFinite(value) ? Math.max(min, value) : fallback;
 }
 

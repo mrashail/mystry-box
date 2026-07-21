@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import type { GiftRule } from "@prisma/client";
+import type { GiftRule, MysteryBox, MysteryBoxChild } from "@prisma/client";
 import {
   conditionMatches,
   giftRuleMatches,
+  pickChildren,
   priceTierForQuantity,
 } from "./promotion-engine.server";
 import type { CartSnapshot } from "./promotions.types";
@@ -99,6 +100,40 @@ assert.deepEqual(
     3,
   ),
   { minQuantity: 3, adjustmentType: "FIXED_PRICE", value: 10 },
+);
+
+// --- Sequential selection must be contiguous, not skip every other item ---
+const seqChildren = ["A", "B", "C", "D", "E"].map(
+  (id, position) =>
+    ({
+      variantId: id,
+      productTitle: id,
+      variantTitle: id,
+      available: true,
+      inventoryQuantity: 10,
+      weight: 1,
+      position,
+    }) as unknown as MysteryBoxChild,
+);
+const seqBox = {
+  selectionMethod: "SEQUENTIAL",
+  inventoryBehavior: "IGNORE",
+  allowDuplicateChoices: false,
+  cursor: 0,
+  children: seqChildren,
+} as unknown as MysteryBox & { children: MysteryBoxChild[] };
+
+assert.deepEqual(
+  pickChildren(seqBox, 2, seqChildren).map((c) => c.variantId),
+  ["A", "B"],
+  "sequential picks must be consecutive (A,B) — not skip to A,C",
+);
+assert.deepEqual(
+  pickChildren({ ...seqBox, cursor: 3 } as any, 3, seqChildren).map(
+    (c) => c.variantId,
+  ),
+  ["D", "E", "A"],
+  "sequential picks must wrap around the full pool from the cursor",
 );
 
 console.log("promotion engine assertions passed");
