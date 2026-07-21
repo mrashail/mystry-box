@@ -34,7 +34,7 @@
     node.id = "giftlab-toast";
     node.setAttribute("role", "status");
     node.textContent = message;
-    Object.assign(node.style, { position: "fixed", right: "20px", bottom: "20px", zIndex: "2147483000", maxWidth: "360px", padding: "14px 18px", borderRadius: "12px", color: "#fff", background: "#173f33", boxShadow: "0 14px 40px rgba(0,0,0,.22)", font: "600 14px/1.4 system-ui,sans-serif", opacity: "0", transform: "translateY(8px)", transition: ".2s ease" });
+    Object.assign(node.style, { position: "fixed", right: "20px", top: "20px", zIndex: "2147483000", maxWidth: "360px", padding: "14px 18px", borderRadius: "12px", color: "#fff", background: "#173f33", boxShadow: "0 14px 40px rgba(0,0,0,.22)", font: "600 14px/1.4 system-ui,sans-serif", opacity: "0", transform: "translateY(-8px)", transition: ".2s ease" });
     document.body.appendChild(node);
     requestAnimationFrame(function () { node.style.opacity = "1"; node.style.transform = "translateY(0)"; });
     setTimeout(function () { node.style.opacity = "0"; setTimeout(function () { node.remove(); }, 250); }, 4200);
@@ -130,6 +130,20 @@
     }
   }
 
+  // Classes/attributes different themes use to mark a drawer/modal as open.
+  var OPEN_STATE_CLASSES = ["active", "is-open", "open", "drawer--open", "js-drawer-open", "is-visible", "cart-drawer--open"];
+
+  function preserveOpenState(target, source) {
+    OPEN_STATE_CLASSES.forEach(function (cls) {
+      if (target.classList.contains(cls)) source.classList.add(cls);
+      else source.classList.remove(cls);
+    });
+    if (target.hasAttribute("open")) source.setAttribute("open", "");
+    else source.removeAttribute("open");
+    var ariaHidden = target.getAttribute("aria-hidden");
+    if (ariaHidden !== null) source.setAttribute("aria-hidden", ariaHidden);
+  }
+
   function updateDOMWithSections(sectionsJson) {
     console.log("GiftLab updating DOM using mutation response sections...");
     var selectors = [
@@ -153,12 +167,19 @@
 
     var parser = new DOMParser();
     var doc = parser.parseFromString(combinedHtml, "text/html");
-    
+
     selectors.forEach(function (selector) {
       var target = document.querySelector(selector);
       var source = doc.querySelector(selector);
       if (target && source) {
         console.log("GiftLab updating element selector from cache:", selector);
+        // The freshly fetched section markup always describes the drawer in
+        // its default *closed* state. Blindly copying its class/attributes
+        // onto a drawer that's currently open rips the open/active flag off,
+        // so the drawer snaps shut and the theme reopens it a frame later —
+        // the exact flicker shoppers see. Carry the live open state across the
+        // swap so the contents update in place without ever closing.
+        preserveOpenState(target, source);
         target.innerHTML = source.innerHTML;
         target.className = source.className;
         for (var a = 0; a < source.attributes.length; a++) {
@@ -171,7 +192,9 @@
     });
 
     document.dispatchEvent(new CustomEvent("cart:refresh"));
-    document.dispatchEvent(new CustomEvent("cart:updated"));
+    // Tag this as our own update so the cart:updated listener below doesn't
+    // treat it as an external cart change and kick off a second evaluate().
+    document.dispatchEvent(new CustomEvent("cart:updated", { detail: { source: "giftlab" } }));
     if (window.theme && window.theme.CartDrawer && typeof window.theme.CartDrawer.render === "function") {
       try { window.theme.CartDrawer.render(); } catch (e) {}
     }
