@@ -60,7 +60,6 @@ function localDate(value?: string | null) {
 // rules, price tiers — lined up at the same x-position regardless of how
 // long the product title or which fields happen to be visible.
 const CHILD_ROW_GRID = "auto 1fr 90px 40px";
-const RULE_ROW_GRID = "140px 130px 1fr 40px";
 const TIER_ROW_GRID = "120px 1fr 120px 40px";
 
 export function MysteryBoxEditor({
@@ -84,7 +83,6 @@ export function MysteryBoxEditor({
   });
   const [promotionType] = useState(value.bogo.enabled ? "BOGO" : "STANDARD");
   const [children, setChildren] = useState(value.children);
-  const [rules, setRules] = useState(value.matchingRules);
   const [tiers, setTiers] = useState(value.priceTiers);
   const skuFetcher = useFetcher<{
     variants: ResolvedSkuVariant[];
@@ -168,13 +166,15 @@ export function MysteryBoxEditor({
   const disableSave =
     busy ||
     (promotionType === "BOGO" && !parent.productId) ||
-    (!children.length && !rules.length);
+    !children.length;
 
   return (
     <Form method="post">
       <input type="hidden" name="parent" value={JSON.stringify(parent)} />
       <input type="hidden" name="children" value={JSON.stringify(children)} />
-      <input type="hidden" name="matchingRules" value={JSON.stringify(rules)} />
+      {/* Automatic pool matching was removed from the UI; always submit an
+          empty set so the pool comes only from explicit products + SKUs. */}
+      <input type="hidden" name="matchingRules" value="[]" />
       <input type="hidden" name="priceTiers" value={JSON.stringify(tiers)} />
       <input
         type="hidden"
@@ -388,107 +388,6 @@ export function MysteryBoxEditor({
                 No variant found for: {skuNotFound.join(", ")}
               </s-banner>
             )}
-          </s-stack>
-        </s-section>
-
-        <s-section heading="Automatic pool matching">
-          <s-stack direction="block" gap="base">
-            <s-paragraph color="subdued">
-              Automatically include catalog variants by title or SKU.
-            </s-paragraph>
-            {rules.length > 0 && (
-              <s-stack direction="block" gap="small-300">
-                {rules.map((rule, index) => (
-                  <s-box
-                    key={index}
-                    padding="small-300"
-                    background="subdued"
-                    borderRadius="base"
-                  >
-                    <s-grid gridTemplateColumns={RULE_ROW_GRID} gap="base" alignItems="center">
-                      <s-select
-                        label="Field"
-                        labelAccessibilityVisibility="exclusive"
-                        value={rule.field}
-                        onChange={(event: any) =>
-                          setRules((current) =>
-                            current.map((item, i) =>
-                              i === index
-                                ? {
-                                    ...item,
-                                    field: event.target.value as MatchingRule["field"],
-                                  }
-                                : item,
-                            ),
-                          )
-                        }
-                      >
-                        <s-option value="variant_title">Variant name</s-option>
-                        <s-option value="sku">SKU</s-option>
-                      </s-select>
-                      <s-select
-                        label="Operator"
-                        labelAccessibilityVisibility="exclusive"
-                        value={rule.operator}
-                        onChange={(event: any) =>
-                          setRules((current) =>
-                            current.map((item, i) =>
-                              i === index
-                                ? {
-                                    ...item,
-                                    operator: event.target
-                                      .value as MatchingRule["operator"],
-                                  }
-                                : item,
-                            ),
-                          )
-                        }
-                      >
-                        <s-option value="starts_with">Starts with</s-option>
-                        <s-option value="ends_with">Ends with</s-option>
-                        <s-option value="contains">Contains</s-option>
-                      </s-select>
-                      <s-text-field
-                        label="Value"
-                        labelAccessibilityVisibility="exclusive"
-                        value={rule.value}
-                        placeholder="ABC-"
-                        onChange={(event: any) =>
-                          setRules((current) =>
-                            current.map((item, i) =>
-                              i === index ? { ...item, value: event.target.value } : item,
-                            ),
-                          )
-                        }
-                      ></s-text-field>
-                      <s-button
-                        icon="delete"
-                        accessibilityLabel="Remove matching rule"
-                        tone="critical"
-                        variant="tertiary"
-                        onClick={() =>
-                          setRules((current) => current.filter((_, i) => i !== index))
-                        }
-                      ></s-button>
-                    </s-grid>
-                  </s-box>
-                ))}
-              </s-stack>
-            )}
-            <div>
-              <s-button
-                icon="plus"
-                accessibilityLabel="Add matching rule"
-                onClick={() =>
-                  setRules((current) => [
-                    ...current,
-                    { field: "sku", operator: "starts_with", value: "" },
-                  ])
-                }
-              >
-                Add matching rule
-              </s-button>
-            </div>
           </s-stack>
         </s-section>
 
