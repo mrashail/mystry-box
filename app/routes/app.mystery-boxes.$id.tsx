@@ -48,6 +48,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const form = await request.formData();
   const parsed = mysteryFormData(form);
   const isBogo = (parsed.data.bogo as any)?.enabled;
+  const priceTiers = (parsed.data.priceTiers as any[]) || [];
 
   if (
     !parsed.data.name ||
@@ -59,6 +60,14 @@ export async function action({ request, params }: ActionFunctionArgs) {
         error:
           "Name, trigger product (for BOGO), and at least one child or matching rule are required.",
       },
+      { status: 400 },
+    );
+
+  // A standard mystery box is a product the shopper pays for — it must have a
+  // real price (BOGO boxes price off their trigger product, so they're exempt).
+  if (!isBogo && !(Number(parsed.data.boxPrice) > 0))
+    return Response.json(
+      { error: "Please set a box price greater than 0 before saving." },
       { status: 400 },
     );
 
@@ -77,8 +86,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const finalParentVariantId = isBogo ? parsed.parent.variantId || null : boxVariantId;
   const finalParentVariantTitle = isBogo ? parsed.parent.variantTitle || null : "Default Title";
 
+  // Only BOGO or price-tier boxes need a native Discounts-page entry; a plain
+  // priced box needs none. Create it when newly needed, and remove a stale one
+  // if the box is disabled OR no longer has tiers/BOGO.
+  const needsDiscount = isBogo || priceTiers.length > 0;
+
   let shopifyDiscountId = box.shopifyDiscountId;
-  if (parsed.data.enabled && !shopifyDiscountId) {
+  if (parsed.data.enabled && needsDiscount && !shopifyDiscountId) {
     try {
       const secret = await ensurePromotionSecret(session.shop);
       shopifyDiscountId = await createPromotionDiscount(admin, {
@@ -91,7 +105,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
         { status: 400 },
       );
     }
-  } else if (!parsed.data.enabled && shopifyDiscountId) {
+  } else if ((!parsed.data.enabled || !needsDiscount) && shopifyDiscountId) {
     await deletePromotionDiscount(admin, shopifyDiscountId);
     shopifyDiscountId = null;
   }
@@ -126,7 +140,8 @@ export async function action({ request, params }: ActionFunctionArgs) {
       },
     }),
   ]);
-  return redirect("/app/rules");
+  // Stay on this box's own edit page after saving instead of the rules list.
+  return redirect(`/app/mystery-boxes/${box.id}`);
 }
 
 export default function EditMysteryBox() {

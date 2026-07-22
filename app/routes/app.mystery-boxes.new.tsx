@@ -12,6 +12,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const form = await request.formData();
   const parsed = mysteryFormData(form);
   const isBogo = (parsed.data.bogo as any)?.enabled;
+  const priceTiers = (parsed.data.priceTiers as any[]) || [];
 
   if (
     !parsed.data.name ||
@@ -23,6 +24,15 @@ export async function action({ request }: ActionFunctionArgs) {
         error:
           "Name, trigger product (for BOGO), and at least one child or matching rule are required.",
       },
+      { status: 400 },
+    );
+
+  // A standard mystery box IS a product the shopper pays for, so it must have a
+  // real price — a $0 box would be given away free. (BOGO boxes are priced off
+  // their trigger product, so this doesn't apply to them.)
+  if (!isBogo && !(Number(parsed.data.boxPrice) > 0))
+    return Response.json(
+      { error: "Please set a box price greater than 0 before saving." },
       { status: 400 },
     );
 
@@ -39,8 +49,15 @@ export async function action({ request }: ActionFunctionArgs) {
   const finalParentVariantId = isBogo ? parsed.parent.variantId || null : boxVariantId;
   const finalParentVariantTitle = isBogo ? parsed.parent.variantTitle || null : "Default Title";
 
+  // Only a box whose checkout Function actually does something needs a native
+  // Discounts-page entry: BOGO (zeroes the bonus line) or progressive price
+  // tiers (adjusts the box price by quantity). A plain box is just a priced
+  // product — creating an empty automatic discount for it only clutters the
+  // merchant's Discounts page and does nothing.
+  const needsDiscount = isBogo || priceTiers.length > 0;
+
   let shopifyDiscountId: string | null = null;
-  if (parsed.data.enabled) {
+  if (parsed.data.enabled && needsDiscount) {
     try {
       const secret = await ensurePromotionSecret(session.shop);
       shopifyDiscountId = await createPromotionDiscount(admin, {
@@ -59,8 +76,9 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  let createdBox;
   try {
-    await prisma.mysteryBox.create({
+    createdBox = await prisma.mysteryBox.create({
       data: {
         shop: session.shop,
         ...parsed.data,
@@ -97,7 +115,8 @@ export async function action({ request }: ActionFunctionArgs) {
       { status: 500 },
     );
   }
-  return redirect("/app/rules");
+  // Land on the new box's own edit page so the merchant stays in the form.
+  return redirect(`/app/mystery-boxes/${createdBox.id}`);
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
