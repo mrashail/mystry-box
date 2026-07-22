@@ -28,13 +28,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
     prisma.catalogVariant.count({ where: { shop: session.shop } }),
   ]);
 
-  // Each enabled rule/box should carry its own Shopify discount id (created
-  // automatically when it was turned on). Any without one means creation
-  // failed or predates that mechanism — surface it instead of a blanket
-  // "not activated" banner.
+  // Every enabled gift rule needs its own Shopify discount (the checkout
+  // Function is what actually zeroes the gift line). A mystery box only needs
+  // one when its checkout Function step does something — BOGO (zeroes the
+  // bonus line) or progressive price tiers (adjusts the box price) — a plain
+  // priced box is correctly discount-less by design, so it must NOT be
+  // counted as "missing" one.
+  const mysteryNeedsDiscount = (box: (typeof mysteries)[number]) =>
+    Boolean((box.bogo as any)?.enabled) ||
+    ((box.priceTiers as unknown as unknown[]) ?? []).length > 0;
   const missingDiscounts =
     gifts.filter((rule) => rule.enabled && !rule.shopifyDiscountId).length +
-    mysteries.filter((box) => box.enabled && !box.shopifyDiscountId).length;
+    mysteries.filter((box) => box.enabled && mysteryNeedsDiscount(box) && !box.shopifyDiscountId).length;
 
   const active = (r: { enabled: boolean; startsAt: Date | null; endsAt: Date | null }) => {
     if (!r.enabled) return false;
@@ -220,11 +225,15 @@ export async function action({ request }: ActionFunctionArgs) {
       await prisma.mysteryBox.delete({ where: { id } });
     } else if (intent === "toggle") {
       const enabling = !box.enabled;
+      const isBogo = Boolean((box.bogo as { enabled?: boolean } | null)?.enabled);
+      const hasPriceTiers = ((box.priceTiers as unknown as unknown[]) ?? []).length > 0;
+      // Only BOGO or price-tier boxes need the checkout Function to do
+      // anything — a plain priced box needs no discount at all.
+      const needsDiscount = isBogo || hasPriceTiers;
       let shopifyDiscountId = box.shopifyDiscountId;
-      if (enabling && !shopifyDiscountId) {
+      if (enabling && needsDiscount && !shopifyDiscountId) {
         try {
           const secret = await ensurePromotionSecret(session.shop);
-          const isBogo = (box.bogo as { enabled?: boolean } | null)?.enabled;
           shopifyDiscountId = await createPromotionDiscount(admin, {
             title: `${isBogo ? "Mystery Box BOGO" : "Mystery box"}: ${box.name}`,
             secret,
@@ -235,7 +244,7 @@ export async function action({ request }: ActionFunctionArgs) {
             { status: 400 },
           );
         }
-      } else if (!enabling && shopifyDiscountId) {
+      } else if ((!enabling || !needsDiscount) && shopifyDiscountId) {
         await deletePromotionDiscount(admin, shopifyDiscountId);
         shopifyDiscountId = null;
       }

@@ -30,8 +30,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
     prisma.catalogVariant.count({ where: { shop: session.shop } }),
     Promise.all([
       prisma.giftRule.count({ where: { shop: session.shop, enabled: true, shopifyDiscountId: null } }),
-      prisma.mysteryBox.count({ where: { shop: session.shop, enabled: true, shopifyDiscountId: null } }),
-    ]).then(([gifts, boxes]) => gifts + boxes),
+      // A plain mystery box (no BOGO, no price tiers) is correctly
+      // discount-less by design — only count/offer to repair boxes whose
+      // checkout Function step actually does something.
+      prisma.mysteryBox.findMany({
+        where: { shop: session.shop, enabled: true, shopifyDiscountId: null },
+        select: { bogo: true, priceTiers: true },
+      }),
+    ]).then(([gifts, boxes]) => {
+      const needingDiscount = boxes.filter(
+        (box) =>
+          Boolean((box.bogo as { enabled?: boolean } | null)?.enabled) ||
+          ((box.priceTiers as unknown as unknown[]) ?? []).length > 0,
+      ).length;
+      return gifts + needingDiscount;
+    }),
   ]);
 
   return { settings, catalogCount, missingDiscounts };
@@ -71,8 +84,13 @@ export async function action({
       }
     }
     for (const box of boxes) {
+      const isBogo = Boolean((box.bogo as { enabled?: boolean } | null)?.enabled);
+      const hasPriceTiers = ((box.priceTiers as unknown as unknown[]) ?? []).length > 0;
+      // A plain box's checkout Function step does nothing, so it's correctly
+      // discount-less by design — skip it rather than "repairing" a discount
+      // it was never supposed to have.
+      if (!isBogo && !hasPriceTiers) continue;
       try {
-        const isBogo = (box.bogo as { enabled?: boolean } | null)?.enabled;
         const shopifyDiscountId = await createPromotionDiscount(admin, {
           title: `${isBogo ? "Mystery Box BOGO" : "Mystery box"}: ${box.name}`,
           secret,

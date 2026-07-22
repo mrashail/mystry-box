@@ -27,10 +27,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
   ]);
 
   // Each enabled rule/box carries its own Shopify discount id, created
-  // automatically when it's turned on — no single shop-wide toggle anymore.
+  // automatically when it's turned on — no single shop-wide toggle anymore. A
+  // plain mystery box (no BOGO, no price tiers) is correctly discount-less by
+  // design, since its checkout Function step wouldn't do anything — don't
+  // flag it as "missing" one.
   const missingDiscounts =
     giftRules.filter((rule) => rule.enabled && !rule.shopifyDiscountId).length +
-    boxes.filter((box) => box.enabled && !box.shopifyDiscountId).length;
+    boxes.filter(
+      (box) =>
+        box.enabled &&
+        !box.shopifyDiscountId &&
+        (Boolean((box.bogo as { enabled?: boolean } | null)?.enabled) ||
+          ((box.priceTiers as unknown as unknown[]) ?? []).length > 0),
+    ).length;
 
   const active = (item: { enabled: boolean; startsAt: Date | null; endsAt: Date | null }) =>
     item.enabled && (!item.startsAt || item.startsAt <= now) && (!item.endsAt || item.endsAt >= now);
