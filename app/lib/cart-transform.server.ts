@@ -15,6 +15,31 @@ export async function ensureCartTransform(admin: AdminClient, shop: string): Pro
     return settings.cartTransformId;
   }
 
+  // 1. Check if a CartTransform is already registered on the shop
+  try {
+    const listResponse = await admin.graphql(
+      `#graphql
+      query ListCartTransforms {
+        cartTransforms(first: 10) {
+          nodes { id functionId }
+        }
+      }`,
+    );
+    const listJson = (await listResponse.json()) as any;
+    const existing = listJson.data?.cartTransforms?.nodes?.[0]?.id;
+    if (existing) {
+      await prisma.shopSettings.upsert({
+        where: { shop },
+        update: { cartTransformId: existing },
+        create: { shop, cartTransformId: existing },
+      });
+      return existing;
+    }
+  } catch (err) {
+    console.warn("Could not list CartTransforms:", err);
+  }
+
+  // 2. If not existing, create it using functionHandle
   const response = await admin.graphql(
     `#graphql
     mutation CreateCartTransform($functionHandle: String!) {
@@ -44,14 +69,10 @@ export async function ensureCartTransform(admin: AdminClient, shop: string): Pro
   const cartTransformId = payload?.cartTransform?.id;
 
   if (!cartTransformId) {
-    const errorMsg =
-      payload?.userErrors?.map((e) => e.message).join(", ") ||
-      json.errors?.map((e) => e.message).join(", ") ||
-      "Could not create Cart Transform instance.";
-    console.warn("CartTransform creation message:", errorMsg);
+    // If creation failed, try listing again in case it was created concurrently
     const listResponse = await admin.graphql(
       `#graphql
-      query ListCartTransforms {
+      query ListCartTransformsRetry {
         cartTransforms(first: 10) {
           nodes { id functionId }
         }
@@ -67,6 +88,11 @@ export async function ensureCartTransform(admin: AdminClient, shop: string): Pro
       });
       return existing;
     }
+
+    const errorMsg =
+      payload?.userErrors?.map((e) => e.message).join(", ") ||
+      json.errors?.map((e) => e.message).join(", ") ||
+      "Could not create Cart Transform instance.";
     throw new Error(errorMsg);
   }
 
@@ -157,5 +183,7 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
   const userErrors = json.data?.metafieldsSet?.userErrors;
   if (userErrors && userErrors.length > 0) {
     console.error("User errors setting CartTransform rules metafield:", userErrors);
+  } else {
+    console.log("Successfully synced CartTransform rules metafield for shop:", shop, "metafieldValue:", metafieldValue);
   }
 }
