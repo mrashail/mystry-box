@@ -394,6 +394,31 @@
     return rule.matchMode === "ANY" ? results.some(Boolean) : results.every(Boolean);
   }
 
+  // At add-to-cart time the item(s) about to be added aren't in the cart
+  // snapshot yet, and all we know about them is a bare variant id (no price,
+  // no product id — themes send just `id`/`items[].id` to /cart/add) — not
+  // enough to safely simulate a subtotal, quantity, or product-level
+  // condition. The one thing we CAN say with total certainty is "this exact
+  // variant is one of the ones being added" — a "variant equals" condition
+  // targeting it is guaranteed true regardless of what else happens. Every
+  // other condition is judged against the cart as it stands right NOW
+  // (before this add): if this very add is what pushes it over the line, the
+  // very next evaluate() reconcile (already fast) picks it up a beat later —
+  // far better than instant-batching a gift whose condition doesn't actually
+  // end up true and having to silently un-add it (the flash the merchant saw).
+  function ruleConditionsMatchAtAddTime(rule, cart, probeVariantIds) {
+    var conditions = rule.conditions || [];
+    if (conditions.length === 0) return true;
+    var results = conditions.map(function (cond) {
+      if (cond.field === "variant" && cond.operator === "equals" && probeVariantIds && probeVariantIds.length) {
+        var targetIds = Array.isArray(cond.value) ? cond.value.map(numericId) : [numericId(cond.value)];
+        if (probeVariantIds.some(function (id) { return targetIds.indexOf(id) !== -1; })) return true;
+      }
+      return matchCondition(cond, cart);
+    });
+    return rule.matchMode === "ANY" ? results.some(Boolean) : results.every(Boolean);
+  }
+
   // How many of a rule's configured gift variants to actually award: one when
   // "Allow multiple gifts" is off or "One gift per order" is set, otherwise up
   // to "Maximum gifts from this rule". (Note: the per-gift Qty field controls
@@ -411,14 +436,18 @@
   // conditions met, ordered by priority (lower first), and collapsed to just
   // the top rule when any matching rule is non-stackable — the same conflict
   // handling the server applies for the default strategy. Pass
-  // ignoreConditions=true at add-to-cart time, when the product isn't in the
-  // cart snapshot yet, so customer gates still apply but condition checks are
-  // left to the follow-up reconcile.
-  function computeEffectiveRules(rules, cart, ignoreConditions) {
+  // probeVariantIds (an array of variant ids about to be added to the cart)
+  // at add-to-cart time — see ruleConditionsMatchAtAddTime for why only an
+  // exact "variant equals" match can be trusted before the add lands, and
+  // everything else is judged against the cart as it stands right now.
+  // Omit/pass null for the normal full-reconcile pass (cart already reflects
+  // everything that's happened).
+  function computeEffectiveRules(rules, cart, probeVariantIds) {
     var matched = (rules || []).filter(function (rule) {
       if (!ruleAllowedForCustomer(rule)) return false;
-      if (ignoreConditions) return true;
-      return ruleConditionsMatch(rule, cart);
+      return probeVariantIds
+        ? ruleConditionsMatchAtAddTime(rule, cart, probeVariantIds)
+        : ruleConditionsMatch(rule, cart);
     });
     matched.sort(function (a, b) { return (a.priority == null ? 100 : a.priority) - (b.priority == null ? 100 : b.priority); });
     var hasNonStackable = matched.some(function (rule) { return !rule.stackable; });
@@ -435,7 +464,7 @@
   function evaluateRulesLocally(rules, cart, previousCart) {
     // Honors every Free Gift form toggle: customer tags / first-purchase gate,
     // priority ordering, and stackable conflict resolution.
-    var matchedRules = computeEffectiveRules(rules, cart, false);
+    var matchedRules = computeEffectiveRules(rules, cart, null);
 
     var declinedSet = {};
     parseDeclinedGiftIds(cart).forEach(function (id) { declinedSet[id] = true; });
@@ -791,11 +820,17 @@
 
   function getMatchingGiftsForPayload(items) {
     if (!cachedRules || !cachedRules.length) return [];
-    // Customer gates (tags / first-purchase) + priority + stackable apply even
-    // at add time; conditions are deferred (ignoreConditions=true) because the
-    // product being added isn't in the cart snapshot yet — the follow-up
-    // evaluate() reconcile removes any gift whose conditions don't end up met.
-    var effective = computeEffectiveRules(cachedRules, cachedCart, true);
+    if (!cachedCart) return [];
+    // Customer gates (tags / first-purchase) + priority + stackable apply at
+    // add time too; conditions are checked via ruleConditionsMatchAtAddTime —
+    // only an exact "variant equals" match on one of these ids is trusted
+    // before the add lands, everything else is judged against the confirmed
+    // current cart (see that function for why: batching a gift for e.g. a
+    // subtotal condition this add doesn't actually satisfy — an unrelated
+    // low-value product like a mystery box — was exactly the "gift flashes
+    // in then vanishes" bug).
+    var probeVariantIds = (items || []).map(function (it) { return numericId(it.id); }).filter(Boolean);
+    var effective = computeEffectiveRules(cachedRules, cachedCart, probeVariantIds);
     var giftsToAdd = [];
     effective.forEach(function (rule) {
       if (isRuleDeclined(rule.id)) return;
