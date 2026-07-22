@@ -107,17 +107,23 @@ export interface CartSnapshot {
     orderCount?: number;
   };
   country?: string;
+  attributes?: Record<string, string>;
 }
 
 export interface CartMutation {
-  type: "ADD" | "CHANGE";
+  type: "ADD" | "CHANGE" | "ATTRIBUTES";
   variantId?: string;
   lineKey?: string;
-  quantity: number;
+  quantity?: number;
   properties?: Record<string, string>;
+  // Only present (and only meaningful) for type "ATTRIBUTES" — a full
+  // replacement set of cart attributes, since Shopify's cart/update.js
+  // replaces attributes wholesale rather than merging them.
+  attributes?: Record<string, string>;
   // A silent mutation only updates hidden line-item properties without changing
-  // what the shopper sees (e.g. tagging a mystery-box parent with its selection),
-  // so the storefront can apply it without a visible cart reload.
+  // what the shopper sees (e.g. tagging a mystery-box parent with its selection,
+  // or persisting a declined-gift attribute), so the storefront can apply it
+  // without a visible cart reload.
   silent?: boolean;
 }
 

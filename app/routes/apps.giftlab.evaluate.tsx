@@ -25,6 +25,7 @@ interface AjaxCart {
   }>;
   cart_level_discount_applications?: Array<{ title?: string }>;
   discount_codes?: Array<{ code?: string; applicable?: boolean }>;
+  attributes?: Record<string, string> | null;
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -86,6 +87,7 @@ export async function action({ request }: ActionFunctionArgs) {
     ].filter(Boolean),
     customer: payload.customer,
     country: payload.country,
+    attributes: cart.attributes ?? {},
   };
   return Response.json(await evaluateCart(shop, snapshot), {
     headers: { "Cache-Control": "no-store" },

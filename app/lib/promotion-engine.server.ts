@@ -275,7 +275,27 @@ export function giftRuleMatches(
     : conditions.every((condition) => conditionMatches(condition, cart));
 }
 
-function desiredGiftMutations(
+// Cart attribute holding the comma-separated ids of gift rules the shopper
+// has explicitly declined (by deleting the gift line themselves) while the
+// rule still qualifies. Without this, every cart mutation re-evaluates from
+// scratch — sees the qualifying purchase still in the cart, sees the gift
+// line missing because the shopper just removed it — and adds it straight
+// back, making the gift impossible to actually remove. A cart attribute
+// (rather than a client-only in-memory flag) is what lets this survive page
+// reloads and stays visible to this server-side path too.
+export const GIFTLAB_DECLINED_GIFTS_ATTRIBUTE = "_giftlab_declined_gifts";
+
+function parseDeclinedGiftIds(cart: CartSnapshot): Set<string> {
+  const raw = cart.attributes?.[GIFTLAB_DECLINED_GIFTS_ATTRIBUTE] ?? "";
+  return new Set(
+    raw
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
+}
+
+export function desiredGiftMutations(
   rules: GiftRule[],
   cart: CartSnapshot,
   secret: string,
@@ -294,8 +314,15 @@ function desiredGiftMutations(
           ? matched.slice(0, 1)
           : matched;
 
+  const declinedIds = parseDeclinedGiftIds(cart);
+
   for (const rule of effective) {
     matchedIds.push(rule.id);
+    // Respect an explicit decline: the condition still matches, but the
+    // shopper already said no to this exact gift, so don't re-add it or
+    // re-announce it. It stays declined only while the rule keeps matching —
+    // see the stale-decline cleanup below.
+    if (declinedIds.has(rule.id)) continue;
     const restrictions = (rule.restrictions ??
       {}) as unknown as CustomerRestrictions;
     const configured = asArray<GiftChoice>(rule.gifts);
@@ -382,6 +409,26 @@ function desiredGiftMutations(
       mutations.push({ type: "CHANGE", lineKey: line.key, quantity: 0 });
     }
   }
+
+  // A decline only holds while its rule's condition keeps matching. The
+  // moment the cart no longer qualifies at all, forget it — a later,
+  // independent qualification is a fresh offer, not a re-add of something
+  // already declined.
+  const matchedIdSet = new Set(matched.map((rule) => rule.id));
+  const staleDeclines = [...declinedIds].filter((id) => !matchedIdSet.has(id));
+  if (staleDeclines.length) {
+    const remaining = new Set(declinedIds);
+    staleDeclines.forEach((id) => remaining.delete(id));
+    mutations.push({
+      type: "ATTRIBUTES",
+      attributes: {
+        ...cart.attributes,
+        [GIFTLAB_DECLINED_GIFTS_ATTRIBUTE]: [...remaining].join(","),
+      },
+      silent: true,
+    });
+  }
+
   return { mutations, matchedIds, messages };
 }
 
@@ -1015,6 +1062,7 @@ export async function evaluateCart(
   const planned = [...gifts.mutations, ...mystery.mutations];
   const mutations = [
     ...planned.filter((mutation) => mutation.type === "CHANGE"),
+    ...planned.filter((mutation) => mutation.type === "ATTRIBUTES"),
     ...planned
       .filter((mutation) => mutation.type === "ADD")
       .slice(0, settings.maxAutomaticAdds),

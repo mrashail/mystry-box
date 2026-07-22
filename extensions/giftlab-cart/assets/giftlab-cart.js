@@ -110,7 +110,14 @@
     console.log("GiftLab applying mutation:", mutation);
     var response;
     var urlParams = "?sections=cart-drawer,cart-icon-bubble";
-    if (mutation.type === "CHANGE") {
+    if (mutation.type === "ATTRIBUTES") {
+      // cart/update.js replaces the whole attributes object rather than
+      // merging it, so we must carry forward whatever else was already on
+      // the cart (other apps' attributes, cart notes, etc.) and only
+      // overwrite the keys this mutation actually specifies.
+      var attributes = Object.assign({}, (cachedCart && cachedCart.attributes) || {}, mutation.attributes || {});
+      response = await post("cart/update.js", { attributes: attributes });
+    } else if (mutation.type === "CHANGE") {
       response = await post("cart/change.js" + urlParams, { id: mutation.lineKey, quantity: mutation.quantity, properties: mutation.properties });
     } else {
       response = await post("cart/add.js" + urlParams, { items: [{ id: mutation.variantId, quantity: mutation.quantity, properties: mutation.properties || {} }] });
@@ -301,7 +308,34 @@
     }
   }
 
-  function evaluateRulesLocally(rules, cart) {
+  // Cart attribute holding the comma-separated ids of gift rules the shopper
+  // has explicitly declined (by deleting the gift line themselves) while the
+  // rule still qualifies. Must match GIFTLAB_DECLINED_GIFTS_ATTRIBUTE in
+  // promotion-engine.server.ts exactly — both sides read/write the same cart
+  // attribute so a decline made via the fast local path here is honored by
+  // the server fallback path too, and vice versa.
+  var DECLINED_GIFTS_ATTRIBUTE = "_giftlab_declined_gifts";
+
+  function parseDeclinedGiftIds(cart) {
+    var raw = (cart.attributes && cart.attributes[DECLINED_GIFTS_ATTRIBUTE]) || "";
+    return raw.split(",").map(function (id) { return id.trim(); }).filter(Boolean);
+  }
+
+  function giftLinePresent(cartSnapshot, ruleId, variantId) {
+    return cartSnapshot.items.some(function (item) {
+      return item.properties && item.properties._free_gift_rule === ruleId &&
+        numericId(item.variant_id) === numericId(variantId) && item.quantity > 0;
+    });
+  }
+
+  // previousCart is the cart state we last observed (the prior evaluate
+  // cycle's snapshot), used only to detect the moment a still-qualifying
+  // gift line disappears on its own — i.e. the shopper deleted it themselves
+  // rather than it never having been added. Without that distinction, this
+  // function can't tell "never added" from "just declined," and instantly
+  // re-adds whatever the shopper just removed (see DECLINED_GIFTS_ATTRIBUTE
+  // above for how the decline itself is remembered).
+  function evaluateRulesLocally(rules, cart, previousCart) {
     var matchedRules = [];
     rules.forEach(function (rule) {
       var conditions = rule.conditions || [];
@@ -323,9 +357,41 @@
       }
     });
 
+    var declinedSet = {};
+    parseDeclinedGiftIds(cart).forEach(function (id) { declinedSet[id] = true; });
+    var declinedChanged = false;
+
+    if (previousCart) {
+      matchedRules.forEach(function (rule) {
+        if (declinedSet[rule.id]) return;
+        var justDeclined = rule.gifts.some(function (gift) {
+          return giftLinePresent(previousCart, rule.id, gift.variantId) &&
+            !giftLinePresent(cart, rule.id, gift.variantId);
+        });
+        if (justDeclined) {
+          declinedSet[rule.id] = true;
+          declinedChanged = true;
+          console.log("GiftLab: shopper removed a still-qualifying gift for rule", rule.id, "- respecting the decline instead of re-adding it.");
+        }
+      });
+    }
+
+    // A decline only holds while its rule keeps matching uninterrupted. The
+    // moment the qualifying condition stops being true, forget it — if the
+    // shopper re-qualifies later from scratch, that's a fresh offer, not a
+    // re-add of something already declined.
+    Object.keys(declinedSet).forEach(function (ruleId) {
+      var stillMatches = matchedRules.some(function (r) { return r.id === ruleId; });
+      if (!stillMatches) {
+        delete declinedSet[ruleId];
+        declinedChanged = true;
+      }
+    });
+
     var mutations = [];
     // Add missing gifts
     matchedRules.forEach(function (rule) {
+      if (declinedSet[rule.id]) return;
       rule.gifts.forEach(function (gift) {
         var current = cart.items.find(function (item) {
           return item.properties && item.properties._free_gift_rule === rule.id && numericId(item.variant_id) === numericId(gift.variantId);
@@ -359,11 +425,11 @@
       });
     });
 
-    // Remove gifts that are no longer qualified
+    // Remove gifts that are no longer qualified (or whose rule was just declined)
     cart.items.forEach(function (item) {
       if (item.properties && item.properties._free_gift_rule) {
         var ruleId = item.properties._free_gift_rule;
-        var stillActive = matchedRules.some(function (r) { return r.id === ruleId; });
+        var stillActive = matchedRules.some(function (r) { return r.id === ruleId; }) && !declinedSet[ruleId];
         if (!stillActive) {
           mutations.push({
             type: "CHANGE",
@@ -373,6 +439,12 @@
         }
       }
     });
+
+    if (declinedChanged) {
+      var attributes = {};
+      attributes[DECLINED_GIFTS_ATTRIBUTE] = Object.keys(declinedSet).join(",");
+      mutations.push({ type: "ATTRIBUTES", attributes: attributes, silent: true });
+    }
 
     return mutations;
   }
@@ -503,6 +575,10 @@
         console.warn("GiftLab failed to fetch cart.js. Status:", cartResponse.status);
         return;
       }
+      // Snapshot from the previous cycle, kept only to detect a still-
+      // qualifying gift line disappearing between cycles (i.e. the shopper
+      // just deleted it) — see evaluateRulesLocally's previousCart param.
+      var previousCart = cachedCart;
       var cart = await cartResponse.json();
       cachedCart = cart;
       console.log("GiftLab cart items count:", cart.items.length, "Subtotal:", cart.items_subtotal_price);
@@ -510,15 +586,23 @@
       var didMutate = false;
 
       // Try local evaluation first (instant, covers simple free gifts)
-      var localMutations = evaluateRulesLocally(cachedRules, cart);
+      var localMutations = evaluateRulesLocally(cachedRules, cart, previousCart);
       console.log("GiftLab local evaluation mutations result:", localMutations);
 
       if (localMutations.length > 0) {
+        var addedGift = false;
         for (var k = 0; k < localMutations.length; k += 1) {
-          var r = await applyMutation(localMutations[k]);
-          if (r) didMutate = true;
+          var mut = localMutations[k];
+          var r = await applyMutation(mut);
+          if (r) {
+            if (!mut.silent) didMutate = true;
+            if (mut.type === "ADD") addedGift = true;
+          }
         }
-        await finalizeRender(didMutate, config.dataset.giftMessage || "A free gift has been added to your cart.");
+        // Only announce "gift added" when a gift was actually added this
+        // cycle — a pure removal (the qualifying item left the cart, or the
+        // shopper just declined the gift) must never show this message.
+        await finalizeRender(didMutate, addedGift ? (config.dataset.giftMessage || "A free gift has been added to your cart.") : "");
         return;
       }
 
@@ -546,6 +630,8 @@
       var changes = result.mutations.filter(function (item) { return !(item.type === "CHANGE" && item.quantity === 0); });
 
       var success = true;
+      var addedFallbackGift = false;
+      var addedFallbackMysteryBox = false;
       for (var i = 0; i < removals.length; i += 1) {
         var rr = await applyMutation(removals[i]);
         if (rr) didMutate = true;
@@ -553,15 +639,25 @@
       }
       for (var j = 0; j < changes.length; j += 1) {
         var c = await applyMutation(changes[j]);
-        if (c) didMutate = true;
-        else success = false;
+        if (c) {
+          didMutate = true;
+          if (changes[j].type === "ADD") {
+            if (changes[j].properties && changes[j].properties._mystery_box_reward) addedFallbackMysteryBox = true;
+            else addedFallbackGift = true;
+          }
+        } else success = false;
       }
 
       lastSignature = success ? result.signature : "";
 
       document.dispatchEvent(new CustomEvent("giftlab:cart-updated", { detail: result }));
 
-      var message = (result.messages && result.messages[0]) || (result.matchedGiftRuleIds && result.matchedGiftRuleIds.length ? config.dataset.giftMessage : (result.matchedMysteryBoxIds && result.matchedMysteryBoxIds.length ? config.dataset.mysteryMessage : ""));
+      // Only announce the gift/mystery-box message when something was
+      // actually added this cycle — matchedGiftRuleIds/matchedMysteryBoxIds
+      // can be non-empty purely because a rule still matches (e.g. its gift
+      // was declined, or the box's only mutation was a silent bookkeeping
+      // update), which must not surface a misleading "added" toast.
+      var message = (result.messages && result.messages[0]) || (addedFallbackGift ? config.dataset.giftMessage : (addedFallbackMysteryBox ? config.dataset.mysteryMessage : ""));
       var visibleChange = result.mutations.some(function (item) { return !item.silent; });
       await finalizeRender(didMutate && visibleChange, message);
       return;

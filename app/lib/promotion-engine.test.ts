@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { GiftRule, MysteryBox, MysteryBoxChild } from "@prisma/client";
 import {
   conditionMatches,
+  desiredGiftMutations,
   giftRuleMatches,
   pickChildren,
   priceTierForQuantity,
@@ -134,6 +135,69 @@ assert.deepEqual(
   ),
   ["D", "E", "A"],
   "sequential picks must wrap around the full pool from the cursor",
+);
+
+// --- Deleting a still-qualifying free gift must not silently re-add it ---
+const giftRule = {
+  ...rule,
+  // Tied to the "paid" line's product (101) rather than rule's
+  // customer/country conditions, so removing that line is what makes the
+  // rule stop matching in the reset-cleanup assertion below.
+  conditions: [
+    { field: "product", operator: "equals", value: "101" },
+  ],
+  gifts: [{ variantId: "202", quantity: 1, discountType: "FREE", discountValue: 100 }],
+} as unknown as GiftRule;
+
+const cartMissingGift: CartSnapshot = {
+  ...cart,
+  lines: cart.lines.filter((line) => line.key !== "gift"),
+};
+
+assert.equal(
+  desiredGiftMutations([giftRule], cartMissingGift, "secret", "STACK_ALL")
+    .mutations.some((m) => m.type === "ADD"),
+  true,
+  "a genuinely missing gift (never added) must still be added",
+);
+
+const cartMissingGiftDeclined: CartSnapshot = {
+  ...cartMissingGift,
+  attributes: { _giftlab_declined_gifts: "rule" },
+};
+const declinedResult = desiredGiftMutations(
+  [giftRule],
+  cartMissingGiftDeclined,
+  "secret",
+  "STACK_ALL",
+);
+assert.equal(
+  declinedResult.mutations.some((m) => m.type === "ADD"),
+  false,
+  "a gift the shopper explicitly declined must not be re-added while still declined",
+);
+
+const cartNoLongerQualifying: CartSnapshot = {
+  ...cartMissingGiftDeclined,
+  lines: cartMissingGiftDeclined.lines.filter((line) => line.key !== "paid"),
+};
+const resetResult = desiredGiftMutations(
+  [giftRule],
+  cartNoLongerQualifying,
+  "secret",
+  "STACK_ALL",
+);
+const attributesMutation = resetResult.mutations.find(
+  (m) => m.type === "ATTRIBUTES",
+);
+assert.ok(
+  attributesMutation,
+  "once the rule stops matching, the stale decline must be cleared",
+);
+assert.equal(
+  attributesMutation?.attributes?._giftlab_declined_gifts,
+  "",
+  "the cleared decline list must no longer contain the rule id",
 );
 
 console.log("promotion engine assertions passed");
