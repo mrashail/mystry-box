@@ -753,12 +753,8 @@
     return originalFetch.apply(window, args).then(function (response) {
       if (!isInternal && isCartAction(requestUrl)) {
         if (response.ok) {
-          console.log("GiftLab: External cart fetch succeeded. Triggering instant evaluate()...");
-          // A fresh shopper action: the theme render fetch that follows will be
-          // held (and set this true again). Reset so a stale hold from a prior
-          // cycle can't make us skip our own fallback repaint on this one.
+          console.log("GiftLab: External cart fetch succeeded. Native CartTransform handling line expansion.");
           pendingRenderHold = false;
-          evaluate();
         }
       }
       return response;
@@ -780,8 +776,7 @@
       console.log("GiftLab intercepted XHR. URL:", requestUrl, "isInternal:", isInternal);
       if (!isInternal && isCartAction(requestUrl)) {
         if (self.status >= 200 && self.status < 300) {
-          console.log("GiftLab XHR matched cart action. Triggering instant evaluate()...");
-          evaluate();
+          console.log("GiftLab XHR matched cart action. Native CartTransform handling line expansion.");
         }
       }
     });
