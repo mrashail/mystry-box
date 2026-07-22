@@ -366,6 +366,65 @@
     });
   }
 
+  // ---- Rule qualification, mirroring promotion-engine.server.ts so the
+  // storefront honors every toggle on the Free Gift form exactly the way the
+  // server engine (and the merchant) expects. Kept intentionally close to the
+  // server's giftRuleMatches/restrictionsMatch/desiredGiftMutations. ----
+
+  // Customer-level gates that don't depend on cart contents. Note: "one gift
+  // per customer" can't be judged on the storefront (it needs the shopper's
+  // past-order history, which only the server has), so it is enforced by the
+  // order-level check server-side, not here.
+  function ruleAllowedForCustomer(rule) {
+    var r = rule.restrictions || {};
+    var cust = customer();
+    if (r.firstPurchaseOnly && (cust.orderCount || 0) > 0) return false;
+    var tags = (cust.tags || []).map(function (t) { return String(t).trim().toLowerCase(); });
+    var allowed = r.allowedCustomerTags || [];
+    if (allowed.length && !allowed.some(function (t) { return tags.indexOf(String(t).trim().toLowerCase()) !== -1; })) return false;
+    var excluded = r.excludedCustomerTags || [];
+    if (excluded.length && excluded.some(function (t) { return tags.indexOf(String(t).trim().toLowerCase()) !== -1; })) return false;
+    return true;
+  }
+
+  function ruleConditionsMatch(rule, cart) {
+    var conditions = rule.conditions || [];
+    if (conditions.length === 0) return true;
+    var results = conditions.map(function (cond) { return matchCondition(cond, cart); });
+    return rule.matchMode === "ANY" ? results.some(Boolean) : results.every(Boolean);
+  }
+
+  // How many of a rule's configured gift variants to actually award: one when
+  // "Allow multiple gifts" is off or "One gift per order" is set, otherwise up
+  // to "Maximum gifts from this rule". (Note: the per-gift Qty field controls
+  // how many UNITS of a single gift variant — that's gift.quantity, separate
+  // from this count of distinct variants.)
+  function resolveGiftsForRule(rule) {
+    var configured = rule.gifts || [];
+    var r = rule.restrictions || {};
+    if (r.onePerOrder) return configured.slice(0, 1);
+    if (rule.allowMultiple) return configured.slice(0, Math.max(1, rule.maxGifts || 1));
+    return configured.slice(0, 1);
+  }
+
+  // The rules that should award a gift right now: customer-allowed +
+  // conditions met, ordered by priority (lower first), and collapsed to just
+  // the top rule when any matching rule is non-stackable — the same conflict
+  // handling the server applies for the default strategy. Pass
+  // ignoreConditions=true at add-to-cart time, when the product isn't in the
+  // cart snapshot yet, so customer gates still apply but condition checks are
+  // left to the follow-up reconcile.
+  function computeEffectiveRules(rules, cart, ignoreConditions) {
+    var matched = (rules || []).filter(function (rule) {
+      if (!ruleAllowedForCustomer(rule)) return false;
+      if (ignoreConditions) return true;
+      return ruleConditionsMatch(rule, cart);
+    });
+    matched.sort(function (a, b) { return (a.priority == null ? 100 : a.priority) - (b.priority == null ? 100 : b.priority); });
+    var hasNonStackable = matched.some(function (rule) { return !rule.stackable; });
+    return hasNonStackable ? matched.slice(0, 1) : matched;
+  }
+
   // previousCart is the cart state we last observed (the prior evaluate
   // cycle's snapshot), used only to detect the moment a still-qualifying
   // gift line disappears on its own — i.e. the shopper deleted it themselves
@@ -374,26 +433,9 @@
   // re-adds whatever the shopper just removed (see DECLINED_GIFTS_ATTRIBUTE
   // above for how the decline itself is remembered).
   function evaluateRulesLocally(rules, cart, previousCart) {
-    var matchedRules = [];
-    rules.forEach(function (rule) {
-      var conditions = rule.conditions || [];
-      var match = false;
-      if (conditions.length === 0) {
-        match = true;
-      } else {
-        var matches = conditions.map(function (cond) {
-          return matchCondition(cond, cart);
-        });
-        if (rule.matchMode === "ANY") {
-          match = matches.some(Boolean);
-        } else {
-          match = matches.every(Boolean);
-        }
-      }
-      if (match) {
-        matchedRules.push(rule);
-      }
-    });
+    // Honors every Free Gift form toggle: customer tags / first-purchase gate,
+    // priority ordering, and stackable conflict resolution.
+    var matchedRules = computeEffectiveRules(rules, cart, false);
 
     var declinedSet = {};
     parseDeclinedGiftIds(cart).forEach(function (id) { declinedSet[id] = true; });
@@ -427,10 +469,11 @@
     });
 
     var mutations = [];
-    // Add missing gifts
+    // Add missing gifts (only the resolved subset — respects Allow multiple /
+    // Max gifts / One per order)
     matchedRules.forEach(function (rule) {
       if (declinedSet[rule.id]) return;
-      rule.gifts.forEach(function (gift) {
+      resolveGiftsForRule(rule).forEach(function (gift) {
         var current = cart.items.find(function (item) {
           return item.properties && item.properties._free_gift_rule === rule.id && numericId(item.variant_id) === numericId(gift.variantId);
         });
@@ -457,7 +500,11 @@
             type: "ADD",
             variantId: gift.variantId,
             quantity: gift.quantity,
-            properties: properties
+            properties: properties,
+            // Per-rule storefront message from the Free Gift form, so the
+            // toast reflects what the merchant wrote for this specific rule
+            // (falls back to the block's default message downstream).
+            notification: rule.notification || ""
           });
         }
       });
@@ -639,6 +686,7 @@
 
       if (localMutations.length > 0) {
         var addedGift = false;
+        var giftMessage = "";
         var latestSections = null;
         for (var k = 0; k < localMutations.length; k += 1) {
           var mut = localMutations[k];
@@ -646,11 +694,16 @@
           if (r) {
             patchCachedCartForMutation(mut);
             if (!mut.silent) didMutate = true;
-            if (mut.type === "ADD") addedGift = true;
+            if (mut.type === "ADD") {
+              addedGift = true;
+              // Prefer the per-rule storefront message the merchant wrote.
+              if (mut.notification && !giftMessage) giftMessage = mut.notification;
+            }
             if (r.sections) latestSections = r.sections;
           }
         }
-        await finalizeRender(didMutate, addedGift ? (config.dataset.giftMessage || "A free gift has been added to your cart.") : "", latestSections);
+        var finalMessage = addedGift ? (giftMessage || config.dataset.giftMessage || "A free gift has been added to your cart.") : "";
+        await finalizeRender(didMutate, finalMessage, latestSections);
         return;
       }
       // No local mutation needed: the cart already matches what the rules
@@ -738,18 +791,20 @@
 
   function getMatchingGiftsForPayload(items) {
     if (!cachedRules || !cachedRules.length) return [];
+    // Customer gates (tags / first-purchase) + priority + stackable apply even
+    // at add time; conditions are deferred (ignoreConditions=true) because the
+    // product being added isn't in the cart snapshot yet — the follow-up
+    // evaluate() reconcile removes any gift whose conditions don't end up met.
+    var effective = computeEffectiveRules(cachedRules, cachedCart, true);
     var giftsToAdd = [];
-    cachedRules.forEach(function (rule) {
-      if (rule.gifts && rule.gifts.length > 0) {
-        rule.gifts.forEach(function (g) {
-          // Skip a gift the shopper explicitly declined this session, and one
-          // already present in the cart (prevents duplicate/quantity inflation
-          // when adding a second product while the gift is already there).
-          if (isRuleDeclined(rule.id)) return;
-          if (giftAlreadyInCart(rule, g)) return;
-          giftsToAdd.push(buildGiftItemPayload(rule, g));
-        });
-      }
+    effective.forEach(function (rule) {
+      if (isRuleDeclined(rule.id)) return;
+      resolveGiftsForRule(rule).forEach(function (g) {
+        // Skip a gift already in the cart (prevents duplicate/quantity
+        // inflation when adding a second product while the gift is present).
+        if (giftAlreadyInCart(rule, g)) return;
+        giftsToAdd.push(buildGiftItemPayload(rule, g));
+      });
     });
     return giftsToAdd;
   }
