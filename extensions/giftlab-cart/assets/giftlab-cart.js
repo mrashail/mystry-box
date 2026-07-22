@@ -809,9 +809,20 @@
 
       // Mystery boxes are an entirely independent concern from free gifts —
       // check regardless of what the gift pass above did. A cart with no
-      // mystery box line never calls the server at all.
+      // mystery box line, and that never had one a moment ago either, never
+      // calls the server at all.
+      //
+      // Also fire once on the transition FROM having a box line TO not having
+      // one (previousMysteryLines but not mysteryLines) — that's the shopper
+      // just removing the box. The server's cleanup for "box no longer in
+      // cart" (deleting the persisted MysterySelection roll, so a later
+      // re-add starts fresh instead of reusing the old pick) only runs when
+      // it's actually asked to evaluate that now-box-less cart. Skipping this
+      // call on removal was exactly why re-adding the box kept giving back
+      // the very first item ever rolled for this cart, forever.
       var mysteryLines = findMysteryBoxLines(cart);
-      if (mysteryLines.length > 0) {
+      var previousMysteryLines = previousCart ? findMysteryBoxLines(previousCart) : [];
+      if (mysteryLines.length > 0 || previousMysteryLines.length > 0) {
         var mysteryResult = await runMysteryReconcile(cart);
         if (mysteryResult) {
           if (mysteryResult.didMutate) didMutate = true;
