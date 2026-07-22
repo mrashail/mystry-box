@@ -5,32 +5,27 @@ async function main() {
   const shop = "mrashail-2.myshopify.com";
   const { admin } = await unauthenticated.admin(shop);
 
-  const response = await admin.graphql(
+  const queryResponse = await admin.graphql(
     `#graphql
-    mutation CreateCartTransform($functionHandle: String!) {
-      cartTransformCreate(functionHandle: $functionHandle) {
-        cartTransform { id }
-        userErrors { field message }
+    query ListTransforms {
+      cartTransforms(first: 10) {
+        nodes {
+          id
+          functionId
+        }
+      }
+      shopifyFunctions(first: 20) {
+        nodes {
+          id
+          title
+          apiType
+        }
       }
     }`,
-    {
-      variables: {
-        functionHandle: "giftlab-gift-transform",
-      },
-    },
   );
 
-  try {
-    const json = await response.json();
-    console.log("JSON DATA:", JSON.stringify(json, null, 2));
-  } catch (err: any) {
-    if (err.response) {
-      const text = await err.response.text();
-      console.log("RAW TEXT RESPONSE:", text);
-    } else {
-      console.log("ERR:", err);
-    }
-  }
+  const qJson = await queryResponse.json();
+  console.log("SHOPIFY FUNCTIONS AND TRANSFORMS:", JSON.stringify(qJson, null, 2));
 }
 
 main().catch(console.error).finally(() => prisma.$disconnect());
