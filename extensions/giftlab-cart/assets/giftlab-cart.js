@@ -188,14 +188,7 @@
   function updateDOMWithSections(sectionsJson) {
     console.log("GiftLab updating DOM using mutation response sections...");
     var selectors = [
-      // Never target the "cart-drawer" wrapper itself (or any other outer
-      // dialog/drawer root element): it contains the click-outside-to-close
-      // overlay as a child, and replacing its innerHTML destroys that overlay
-      // node. The theme's own JS grabs a direct reference to the overlay once
-      // at page load and binds its close handler to that exact node — once we
-      // replace it, the new-look-alike overlay has no listener at all, so
-      // clicking outside the drawer silently does nothing. Only ever touch
-      // the inner content regions (items/summary/footer/bubble) below.
+      ".drawer__inner",
       "#CartDrawer-CartItems",
       "cart-drawer-items",
       ".drawer__cart-items-wrapper",
@@ -253,14 +246,7 @@
   async function refreshCartSections() {
     console.log("GiftLab refreshing cart sections...");
     var selectors = [
-      // Never target the "cart-drawer" wrapper itself (or any other outer
-      // dialog/drawer root element): it contains the click-outside-to-close
-      // overlay as a child, and replacing its innerHTML destroys that overlay
-      // node. The theme's own JS grabs a direct reference to the overlay once
-      // at page load and binds its close handler to that exact node — once we
-      // replace it, the new-look-alike overlay has no listener at all, so
-      // clicking outside the drawer silently does nothing. Only ever touch
-      // the inner content regions (items/summary/footer/bubble) below.
+      ".drawer__inner",
       "#CartDrawer-CartItems",
       "cart-drawer-items",
       ".drawer__cart-items-wrapper",
