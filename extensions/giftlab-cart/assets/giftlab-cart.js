@@ -801,21 +801,107 @@
     if (!isInternal && (requestUrl.indexOf("/cart/add") !== -1)) {
       try {
         var options = args[1] || {};
-        if (options.body && typeof options.body === "string" && options.body.indexOf("{") === 0) {
-          var payload = JSON.parse(options.body);
-          var items = payload.items || (payload.id ? [payload] : []);
-          var gifts = getMatchingGiftsForPayload(items);
-          if (gifts.length > 0) {
-            console.log("GiftLab batching gift items into primary add.js payload...", gifts);
-            payload.items = items.concat(gifts);
-            delete payload.id;
-            delete payload.quantity;
-            delete payload.properties;
-            options.body = JSON.stringify(payload);
+        if (options.body) {
+          if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+            var mainId = options.body.get("id");
+            var mainQty = options.body.get("quantity") || "1";
+            if (mainId) {
+              var gifts = getMatchingGiftsForPayload([{ id: mainId }]);
+              if (gifts.length > 0) {
+                console.log("GiftLab batching gift items into FormData add.js payload...", gifts);
+                options.body.delete("id");
+                options.body.delete("quantity");
+                options.body.append("items[0][id]", mainId);
+                options.body.append("items[0][quantity]", mainQty);
+
+                gifts.forEach(function (g, idx) {
+                  var itemIdx = idx + 1;
+                  options.body.append("items[" + itemIdx + "][id]", g.id);
+                  options.body.append("items[" + itemIdx + "][quantity]", String(g.quantity));
+                  if (g.properties) {
+                    Object.keys(g.properties).forEach(function (pk) {
+                      options.body.append("items[" + itemIdx + "][properties][" + pk + "]", g.properties[pk]);
+                    });
+                  }
+                });
+              }
+            }
+          } else if (typeof options.body === "string") {
+            if (options.body.indexOf("{") === 0) {
+              var payload = JSON.parse(options.body);
+              var items = payload.items || (payload.id ? [payload] : []);
+              var gifts = getMatchingGiftsForPayload(items);
+              if (gifts.length > 0) {
+                console.log("GiftLab batching gift items into primary JSON add.js payload...", gifts);
+                payload.items = items.concat(gifts);
+                delete payload.id;
+                delete payload.quantity;
+                delete payload.properties;
+                options.body = JSON.stringify(payload);
+              }
+            }
           }
         }
       } catch (e) {
         console.warn("GiftLab failed to batch add payload:", e);
+      }
+    }
+
+    // Intercept line removal calls (/cart/change.js) to batch remove the gift item simultaneously!
+    if (!isInternal && (requestUrl.indexOf("/cart/change") !== -1)) {
+      try {
+        var options = args[1] || {};
+        var isRemove = false;
+        var lineOrKey = null;
+
+        if (options.body) {
+          if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+            var q = options.body.get("quantity");
+            if (q === "0" || q === 0) {
+              isRemove = true;
+              lineOrKey = options.body.get("line") || options.body.get("id");
+            }
+          } else if (typeof options.body === "string" && options.body.indexOf("{") === 0) {
+            var p = JSON.parse(options.body);
+            if (p.quantity === 0 || p.quantity === "0") {
+              isRemove = true;
+              lineOrKey = p.line || p.id;
+            }
+          }
+        }
+
+        if (isRemove && cachedCart && cachedCart.items) {
+          var updates = {};
+          var hasGiftToRemove = false;
+          cachedCart.items.forEach(function (item, idx) {
+            var lineNum = String(idx + 1);
+            if (lineOrKey === lineNum || lineOrKey === item.key || lineOrKey === String(item.variant_id) || lineOrKey === String(item.id)) {
+              updates[item.key] = 0;
+            } else if (item.properties && (item.properties._free_gift_rule || item.properties._promotion_kind === "free_gift")) {
+              updates[item.key] = 0;
+              hasGiftToRemove = true;
+            }
+          });
+
+          if (hasGiftToRemove) {
+            console.log("GiftLab converting remove call to combined /cart/update.js...", updates);
+            args[0] = getUrl("cart/update.js");
+            var newBody = { updates: updates };
+            if (requestUrl.indexOf("sections=") !== -1) {
+              var secMatch = requestUrl.match(/sections=([^&]*)/);
+              if (secMatch) newBody.sections = secMatch[1];
+            }
+            options.body = JSON.stringify(newBody);
+            options.headers = options.headers || {};
+            if (options.headers instanceof Headers) {
+              options.headers.set("Content-Type", "application/json");
+            } else {
+              options.headers["Content-Type"] = "application/json";
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("GiftLab failed to combine remove payload:", e);
       }
     }
 
