@@ -1,0 +1,39 @@
+{
+  "cart": {
+    "attribute": null,
+    "buyerIdentity": null,
+    "lines": [
+      {
+        "id": "gid://shopify/CartLine/100",
+        "quantity": 1,
+        "cost": {
+          "amountPerQuantity": {
+            "amount": "699.95",
+            "currencyCode": "USD"
+          },
+          "subtotalAmount": {
+            "amount": "699.95",
+            "currencyCode": "USD"
+          }
+        },
+        "merchandise": {
+          "__typename": "ProductVariant",
+          "id": "gid://shopify/ProductVariant/42595477389389",
+          "sku": "SNOWBOARD-1",
+          "product": {
+            "id": "gid://shopify/Product/7670556262477",
+            "vendor": "Snowboards Inc",
+            "productType": "Snowboard"
+          }
+        },
+        "freeGiftRule": null,
+        "promotionKind": null
+      }
+    ]
+  },
+  "cartTransform": {
+    "metafield": {
+      "value": "[{\"id\":\"cmrw5pvdn0004z9zfcwt2uut7\",\"name\":\"free gift\",\"matchMode\":\"ALL\",\"conditions\":[{\"id\":\"initial\",\"field\":\"subtotal\",\"value\":\"50\",\"operator\":\"greater_or_equal\"}],\"gifts\":[{\"variantId\":\"42595477454925\",\"quantity\":1,\"discountType\":\"FREE\",\"discountValue\":100}],\"allowMultiple\":false,\"maxGifts\":1,\"stackable\":true,\"priority\":100,\"restrictions\":{\"allowedCustomerTags\":[],\"excludedCustomerTags\":[]}}]"
+    }
+  }
+}

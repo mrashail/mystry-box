@@ -165,16 +165,6 @@ fn cart_transform_run(
                 continue;
             }
 
-            // Skip if rule has already expanded/added a line in the cart
-            let already_added = input.cart().lines().iter().any(|l| {
-                l.free_gift_rule()
-                    .and_then(|a| a.value())
-                    .map(|s| s.as_str()) == Some(rule.id.as_str())
-            });
-            if already_added {
-                continue;
-            }
-
             let matches = if rule.conditions.is_empty() {
                 true
             } else if rule.match_mode == "ANY" {
@@ -193,12 +183,26 @@ fn cart_transform_run(
                     _ => continue,
                 };
 
+                // Preserve the carrier's own per-unit price explicitly. When a
+                // line is expanded, every component's price must be stated — a
+                // component left with no price adjustment can be presented at
+                // $0, which would make the shopper's actual product free. The
+                // canonical Shopify bundle example sets the original item's
+                // price for exactly this reason, so we mirror it here.
+                let carrier_unit_price = carrier.cost().amount_per_quantity().amount().as_f64();
+
                 let mut expanded_items = vec![
-                    // 1. Original carrier item
+                    // 1. Original carrier item, kept at its real price.
                     schema::ExpandedItem {
                         merchandise_id: carrier_merchandise_id,
                         quantity: *carrier.quantity(),
-                        price: None,
+                        price: Some(schema::ExpandedItemPriceAdjustment {
+                            adjustment: schema::ExpandedItemPriceAdjustmentValue::FixedPricePerUnit(
+                                schema::ExpandedItemFixedPricePerUnitAdjustment {
+                                    amount: Decimal(carrier_unit_price),
+                                },
+                            ),
+                        }),
                         attributes: Some(vec![]),
                     },
                 ];
