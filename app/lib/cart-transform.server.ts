@@ -169,7 +169,7 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
         metafields: [
           {
             ownerId: cartTransformId,
-            namespace: "$app:giftlab-cart-transform",
+            namespace: "$app:giftlab-gift-transform",
             key: "rules-config",
             type: "json",
             value: metafieldValue,

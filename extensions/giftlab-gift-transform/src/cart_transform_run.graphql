@@ -42,7 +42,7 @@ query CartTransformRunInput {
     }
   }
   cartTransform {
-    metafield(namespace: "$app:giftlab-cart-transform", key: "rules-config") {
+    metafield(namespace: "$app:giftlab-gift-transform", key: "rules-config") {
       value
     }
   }
