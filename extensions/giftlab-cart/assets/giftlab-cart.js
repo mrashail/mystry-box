@@ -19,6 +19,11 @@
   var running = false;
   var needsReevaluate = false;
   var lastSignature = "";
+  // Set true the moment we defer (hold) one of the theme's own cart-render
+  // fetches. It tells the evaluation cycle "the theme is going to repaint the
+  // drawer itself once I release its render, so don't repaint it a second time."
+  // Reset to false at the start of every cart mutation the shopper triggers.
+  var pendingRenderHold = false;
 
   var cachedRules = [];
   var cachedCart = null;
@@ -52,46 +57,22 @@
     setTimeout(function () { node.style.opacity = "0"; setTimeout(function () { node.remove(); }, 250); }, 4200);
   }
 
-  function syncCartBadges(itemCount) {
-    // Never guess the count. cart/add.js responses omit the cart-level
-    // item_count, and defaulting a missing value to 0 used to flag the whole
-    // drawer as empty (is-empty) even with items present. If we don't have a
-    // real number, leave the server-rendered sections/badge as-is.
-    if (typeof itemCount !== "number" || isNaN(itemCount)) {
-      console.log("GiftLab syncCartBadges skipped — no reliable count:", itemCount);
-      return;
-    }
-    console.log("GiftLab syncing cart badges to count:", itemCount);
-
-    // Toggle empty cart classes on the drawer element
-    var drawers = document.querySelectorAll("cart-drawer, .drawer, #CartDrawer");
-    drawers.forEach(function (drawer) {
-      if (itemCount === 0) {
-        drawer.classList.add("is-empty");
-      } else {
-        drawer.classList.remove("is-empty");
-      }
+  // The drawer's outer wrapper (#CartDrawer) carries an `is-empty` class that
+  // the theme's CSS uses to hide the whole line-item region and show the empty
+  // state. We deliberately never innerHTML-replace that wrapper (it owns the
+  // click-outside overlay), so when we repaint the inner regions ourselves we
+  // must also mirror its is-empty state — from GROUND TRUTH (the freshly
+  // rendered section markup), never from a guessed item count. Guessing the
+  // count was the original bug: a stale/missing count flagged a full cart as
+  // empty and left it stuck hidden.
+  function syncEmptyStateFromDoc(doc) {
+    var fresh = doc.querySelector("#CartDrawer, cart-drawer");
+    if (!fresh) return;
+    var isEmpty = fresh.classList.contains("is-empty");
+    document.querySelectorAll("#CartDrawer, cart-drawer").forEach(function (el) {
+      if (isEmpty) el.classList.add("is-empty");
+      else el.classList.remove("is-empty");
     });
-
-    if (itemCount === 0) {
-      var bubbles = document.querySelectorAll(".cart-count-bubble, #cart-icon-bubble .cart-count-bubble, .cart-count-bubble");
-      bubbles.forEach(function (el) {
-        el.remove();
-      });
-      var elements = document.querySelectorAll("[data-cart-count], .cart-counter, .cart-count, .header__cart-count");
-      elements.forEach(function (el) {
-        el.textContent = "0";
-        el.classList.add("hidden");
-        el.style.display = "none";
-      });
-    } else {
-      var elements = document.querySelectorAll("[data-cart-count], .cart-counter, .cart-count, .header__cart-count");
-      elements.forEach(function (el) {
-        el.textContent = String(itemCount);
-        el.classList.remove("hidden");
-        el.style.display = "";
-      });
-    }
   }
 
   function getUrl(path) {
@@ -195,6 +176,8 @@
     var parser = new DOMParser();
     var doc = parser.parseFromString(combinedHtml, "text/html");
 
+    syncEmptyStateFromDoc(doc);
+
     selectors.forEach(function (selector) {
       var target = document.querySelector(selector);
       var source = doc.querySelector(selector);
@@ -265,19 +248,6 @@
   function numericId(val) {
     if (!val) return "";
     return String(val).split("/").pop();
-  }
-
-  // Authoritative cart item_count. Used instead of a mutation response's
-  // item_count because cart/add.js doesn't include it.
-  async function fetchCartItemCount() {
-    try {
-      var resp = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1", "Cache-Control": "no-cache" } });
-      if (resp.ok) {
-        var c = await resp.json();
-        return typeof c.item_count === "number" ? c.item_count : null;
-      }
-    } catch (e) {}
-    return null;
   }
 
   function matchCondition(cond, cart) {
@@ -500,6 +470,25 @@
     }
   }
 
+  // Decides who repaints the cart drawer after we've added/removed gift lines,
+  // and repaints only when necessary. The whole point is a SINGLE render with
+  // the gift already in it — never a second "pop-in":
+  //   • didMutate === false → we changed nothing, so there is nothing to
+  //     repaint; the shopper's cart is exactly what the theme already drew.
+  //   • pendingRenderHold === true → the shopper's own action triggered a
+  //     theme render fetch that we're holding until right now; releasing it
+  //     lets the theme paint the drawer once, gift included. We must NOT also
+  //     repaint or the theme would render twice (the flicker/delay shoppers saw).
+  //   • otherwise (single-request themes that add + render in one call, so no
+  //     separate render fetch exists to hold) → we repaint the sections once
+  //     ourselves, from ground-truth server-rendered HTML.
+  async function finalizeRender(didMutate, message) {
+    if (didMutate && !pendingRenderHold) {
+      await refreshCartSections();
+    }
+    if (message) toast(message);
+  }
+
   async function runEvaluateCycle() {
     try {
       // The rules list is fetched once on page load via the (slower, app-proxy
@@ -517,31 +506,19 @@
       var cart = await cartResponse.json();
       cachedCart = cart;
       console.log("GiftLab cart items count:", cart.items.length, "Subtotal:", cart.items_subtotal_price);
-      
-      // Try local evaluation first (instant)
+
+      var didMutate = false;
+
+      // Try local evaluation first (instant, covers simple free gifts)
       var localMutations = evaluateRulesLocally(cachedRules, cart);
       console.log("GiftLab local evaluation mutations result:", localMutations);
-      
+
       if (localMutations.length > 0) {
-        var success = true;
-        var lastResult = null;
         for (var k = 0; k < localMutations.length; k += 1) {
           var r = await applyMutation(localMutations[k]);
-          if (r) {
-            lastResult = r;
-          } else {
-            success = false;
-          }
+          if (r) didMutate = true;
         }
-        if (success && lastResult) {
-          if (lastResult.sections) {
-            updateDOMWithSections(lastResult.sections);
-          } else {
-            await refreshCartSections();
-          }
-          toast(config.dataset.giftMessage || "A free gift has been added to your cart.");
-          syncCartBadges(await fetchCartItemCount());
-        }
+        await finalizeRender(didMutate, config.dataset.giftMessage || "A free gift has been added to your cart.");
         return;
       }
 
@@ -554,10 +531,9 @@
       }
       var result = await response.json();
       console.log("GiftLab evaluation server response:", result);
-      
+
       if (!result.mutations || !result.mutations.length) {
         console.log("GiftLab: No mutations needed.");
-        syncCartBadges(cart.item_count ?? 0);
         return;
       }
       if (result.signature === lastSignature) {
@@ -570,45 +546,24 @@
       var changes = result.mutations.filter(function (item) { return !(item.type === "CHANGE" && item.quantity === 0); });
 
       var success = true;
-      var lastResult = null;
       for (var i = 0; i < removals.length; i += 1) {
-        var r = await applyMutation(removals[i]);
-        if (r) {
-          lastResult = r;
-        } else {
-          success = false;
-        }
+        var rr = await applyMutation(removals[i]);
+        if (rr) didMutate = true;
+        else success = false;
       }
       for (var j = 0; j < changes.length; j += 1) {
         var c = await applyMutation(changes[j]);
-        if (c) {
-          lastResult = c;
-        } else {
-          success = false;
-        }
+        if (c) didMutate = true;
+        else success = false;
       }
 
-      if (success) {
-        lastSignature = result.signature;
-      } else {
-        lastSignature = ""; 
-      }
+      lastSignature = success ? result.signature : "";
 
       document.dispatchEvent(new CustomEvent("giftlab:cart-updated", { detail: result }));
-      document.dispatchEvent(new CustomEvent("cart:refresh"));
-      document.dispatchEvent(new CustomEvent("cart:updated", { detail: { cart: cart, source: "giftlab" } }));
-      
+
       var message = (result.messages && result.messages[0]) || (result.matchedGiftRuleIds && result.matchedGiftRuleIds.length ? config.dataset.giftMessage : (result.matchedMysteryBoxIds && result.matchedMysteryBoxIds.length ? config.dataset.mysteryMessage : ""));
       var visibleChange = result.mutations.some(function (item) { return !item.silent; });
-      if (visibleChange) {
-        if (lastResult && lastResult.sections) {
-          updateDOMWithSections(lastResult.sections);
-        } else {
-          await refreshCartSections();
-        }
-      }
-      toast(message);
-      syncCartBadges(await fetchCartItemCount());
+      await finalizeRender(didMutate && visibleChange, message);
       return;
     } catch (error) {
       console.warn("GiftLab cart evaluation failed with error:", error);
@@ -625,6 +580,18 @@
     return /cart\/(add|change|update|clear)/i.test(url);
   }
 
+  // A theme fetching freshly rendered cart HTML (drawer / cart page / icon
+  // bubble) to repaint the UI after a cart change — e.g. `/cart?section_id=...`
+  // or `/?sections=cart-drawer,cart-icon-bubble`. These are what we hold until
+  // our gift/mystery evaluation settles, so the theme's own single paint
+  // already contains the gift. A cart MUTATION (add/change/…) is deliberately
+  // excluded here so it stays on the mutation path that triggers evaluate().
+  function isCartSectionRender(url) {
+    if (isCartAction(url)) return false;
+    if (!/[?&](sections=|section_id=)/i.test(url)) return false;
+    return /cart/i.test(url);
+  }
+
   // Intercept window.fetch
   var originalFetch = window.fetch;
   window.fetch = function () {
@@ -634,10 +601,30 @@
 
     console.log("GiftLab intercepted fetch. URL:", requestUrl, "isInternal:", isInternal);
 
+    if (!isInternal && isCartSectionRender(requestUrl)) {
+      // Hold the theme's cart repaint until any in-flight gift/mystery
+      // evaluation has finished adding its lines, then let it proceed — so the
+      // theme paints the drawer exactly once, with the gift already present.
+      // No second paint, no empty-then-fill flicker, no visible delay.
+      console.log("GiftLab: holding theme cart render until evaluation settles...");
+      pendingRenderHold = true;
+      // Safety net: never hold the theme's own repaint for more than 3s, even
+      // if an evaluation stalls on a hung network request. A slightly-stale
+      // paint is always better than a drawer that never fills.
+      var holdGuard = new Promise(function (resolve) { setTimeout(resolve, 3000); });
+      return Promise.race([currentEvaluatePromise, holdGuard]).then(function () {
+        return originalFetch.apply(window, args);
+      });
+    }
+
     return originalFetch.apply(window, args).then(function (response) {
       if (!isInternal && isCartAction(requestUrl)) {
         if (response.ok) {
           console.log("GiftLab: External cart fetch succeeded. Triggering instant evaluate()...");
+          // A fresh shopper action: the theme render fetch that follows will be
+          // held (and set this true again). Reset so a stale hold from a prior
+          // cycle can't make us skip our own fallback repaint on this one.
+          pendingRenderHold = false;
           evaluate();
         }
       }
