@@ -8,6 +8,7 @@ import {
   deletePromotionDiscount,
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
+import { syncCartTransformRules } from "../lib/cart-transform.server";
 import { deleteMysteryBoxProduct, syncMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { MetricTile } from "../components/MetricTile";
 
@@ -202,6 +203,7 @@ export async function action({ request }: ActionFunctionArgs) {
         },
       });
     }
+    await syncCartTransformRules(admin, session.shop);
   } else if (type === "MYSTERY") {
     const box = await prisma.mysteryBox.findFirst({
       where: { id, shop: session.shop },

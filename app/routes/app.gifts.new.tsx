@@ -3,6 +3,7 @@ import { GiftRuleEditor } from "../components/GiftRuleEditor";
 import { checked, dateOrNull, integer, json, prismaJson, text } from "../lib/forms.server";
 import type { GiftChoice, RuleCondition } from "../lib/promotions.types";
 import { createPromotionDiscount, deletePromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
+import { syncCartTransformRules } from "../lib/cart-transform.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -39,6 +40,7 @@ export async function action({ request }: ActionFunctionArgs) {
       shopifyDiscountId,
       restrictions: { onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) },
     } });
+    await syncCartTransformRules(admin, session.shop);
   } catch (error) {
     // Don't leave the just-created automatic discount orphaned in Shopify if
     // the owning rule row never gets written.

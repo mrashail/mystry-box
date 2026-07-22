@@ -8,6 +8,7 @@ import {
 import { syncCatalog } from "../lib/catalog.server";
 import { checked, integer, text } from "../lib/forms.server";
 import { createPromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
+import { syncCartTransformRules } from "../lib/cart-transform.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -97,6 +98,7 @@ export async function action({
       maxAutomaticAdds: integer(form, "maxAutomaticAdds", 10, 1),
     },
   });
+  await syncCartTransformRules(admin, session.shop);
   return {
     saved: true,
     synced: 0,

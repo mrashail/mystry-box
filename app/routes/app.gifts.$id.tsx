@@ -8,6 +8,7 @@ import {
   deletePromotionDiscount,
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
+import { syncCartTransformRules } from "../lib/cart-transform.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 import { resolveConditionLabels } from "../lib/condition-labels.server";
@@ -57,6 +58,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
     shopifyDiscountId,
     restrictions: { onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) },
   } });
+  await syncCartTransformRules(admin, session.shop);
   return redirect("/app/rules");
 }
 

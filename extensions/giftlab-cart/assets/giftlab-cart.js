@@ -116,7 +116,7 @@
       // the cart (other apps' attributes, cart notes, etc.) and only
       // overwrite the keys this mutation actually specifies.
       var attributes = Object.assign({}, (cachedCart && cachedCart.attributes) || {}, mutation.attributes || {});
-      response = await post("cart/update.js", { attributes: attributes });
+      response = await post("cart/update.js" + urlParams, { attributes: attributes });
     } else if (mutation.type === "CHANGE") {
       response = await post("cart/change.js" + urlParams, { id: mutation.lineKey, quantity: mutation.quantity, properties: mutation.properties });
     } else {
@@ -136,6 +136,39 @@
         return {};
       }
     }
+  }
+
+  // cachedCart is only refetched from cart.js at the *start* of an evaluate
+  // cycle, before that cycle's own mutations are applied — so left alone, it
+  // stays one cycle stale about anything WE just did (e.g. it would still
+  // show a gift as absent right after we added it). Since cachedCart is what
+  // becomes `previousCart` for the *next* cycle (evaluateRulesLocally's
+  // still-qualifying-gift-just-disappeared check), that staleness broke the
+  // very decline detection it exists to support: deleting a gift the shopper
+  // had just been given looked identical to "never added," and got re-added
+  // instantly. Patching cachedCart in place right after each successful
+  // mutation keeps it an accurate ground truth for the next cycle.
+  function patchCachedCartForMutation(mutation) {
+    if (!cachedCart || !cachedCart.items) return;
+    if (mutation.type === "ATTRIBUTES") {
+      cachedCart.attributes = Object.assign({}, cachedCart.attributes || {}, mutation.attributes || {});
+    } else if (mutation.type === "ADD") {
+      cachedCart.items.push({ variant_id: mutation.variantId, quantity: mutation.quantity, properties: mutation.properties || {} });
+    } else if (mutation.type === "CHANGE") {
+      if (mutation.quantity === 0) {
+        cachedCart.items = cachedCart.items.filter(function (item) {
+          return (item.key || item.variant_id) !== mutation.lineKey;
+        });
+      } else {
+        cachedCart.items.forEach(function (item) {
+          if ((item.key || item.variant_id) === mutation.lineKey) {
+            item.quantity = mutation.quantity;
+            if (mutation.properties) item.properties = mutation.properties;
+          }
+        });
+      }
+    }
+    // ATTRIBUTES mutations don't touch line items — nothing to patch.
   }
 
   // Classes/attributes different themes use to mark a drawer/modal as open.
@@ -554,9 +587,19 @@
   //   • otherwise (single-request themes that add + render in one call, so no
   //     separate render fetch exists to hold) → we repaint the sections once
   //     ourselves, from ground-truth server-rendered HTML.
-  async function finalizeRender(didMutate, message) {
+  //   • sectionsData, when present, is the sections HTML the mutation's own
+  //     cart/add.js|change.js|update.js response already returned (they were
+  //     called with the same sections param refreshCartSections() would use)
+  //     — painting straight from it skips an entirely redundant extra fetch
+  //     for data we already have in hand, cutting a full network round trip
+  //     off the visible delay before the gift shows up.
+  async function finalizeRender(didMutate, message, sectionsData) {
     if (didMutate && !pendingRenderHold) {
-      await refreshCartSections();
+      if (sectionsData) {
+        updateDOMWithSections(sectionsData);
+      } else {
+        await refreshCartSections();
+      }
     }
     if (message) toast(message);
   }
@@ -591,18 +634,21 @@
 
       if (localMutations.length > 0) {
         var addedGift = false;
+        var latestSections = null;
         for (var k = 0; k < localMutations.length; k += 1) {
           var mut = localMutations[k];
           var r = await applyMutation(mut);
           if (r) {
+            patchCachedCartForMutation(mut);
             if (!mut.silent) didMutate = true;
             if (mut.type === "ADD") addedGift = true;
+            if (r.sections) latestSections = r.sections;
           }
         }
         // Only announce "gift added" when a gift was actually added this
         // cycle — a pure removal (the qualifying item left the cart, or the
         // shopper just declined the gift) must never show this message.
-        await finalizeRender(didMutate, addedGift ? (config.dataset.giftMessage || "A free gift has been added to your cart.") : "");
+        await finalizeRender(didMutate, addedGift ? (config.dataset.giftMessage || "A free gift has been added to your cart.") : "", latestSections);
         return;
       }
 
@@ -632,15 +678,21 @@
       var success = true;
       var addedFallbackGift = false;
       var addedFallbackMysteryBox = false;
+      var latestFallbackSections = null;
       for (var i = 0; i < removals.length; i += 1) {
         var rr = await applyMutation(removals[i]);
-        if (rr) didMutate = true;
-        else success = false;
+        if (rr) {
+          patchCachedCartForMutation(removals[i]);
+          didMutate = true;
+          if (rr.sections) latestFallbackSections = rr.sections;
+        } else success = false;
       }
       for (var j = 0; j < changes.length; j += 1) {
         var c = await applyMutation(changes[j]);
         if (c) {
+          patchCachedCartForMutation(changes[j]);
           didMutate = true;
+          if (c.sections) latestFallbackSections = c.sections;
           if (changes[j].type === "ADD") {
             if (changes[j].properties && changes[j].properties._mystery_box_reward) addedFallbackMysteryBox = true;
             else addedFallbackGift = true;
@@ -659,7 +711,7 @@
       // update), which must not surface a misleading "added" toast.
       var message = (result.messages && result.messages[0]) || (addedFallbackGift ? config.dataset.giftMessage : (addedFallbackMysteryBox ? config.dataset.mysteryMessage : ""));
       var visibleChange = result.mutations.some(function (item) { return !item.silent; });
-      await finalizeRender(didMutate && visibleChange, message);
+      await finalizeRender(didMutate && visibleChange, message, latestFallbackSections);
       return;
     } catch (error) {
       console.warn("GiftLab cart evaluation failed with error:", error);
@@ -684,8 +736,19 @@
   // excluded here so it stays on the mutation path that triggers evaluate().
   function isCartSectionRender(url) {
     if (isCartAction(url)) return false;
-    if (!/[?&](sections=|section_id=)/i.test(url)) return false;
-    return /cart/i.test(url);
+    // Matching on "any cart-ish URL with a sections/section_id param" was too
+    // broad: themes fetch other, unrelated cart-adjacent sections (e.g. a
+    // background main-cart-items prefetch) that have nothing to do with the
+    // drawer repainting. Holding one of those made finalizeRender assume "the
+    // theme will repaint the drawer for me" when nothing actually would,
+    // silently leaving the drawer stuck showing stale content (verified live:
+    // the gift lands in the real cart but never appears in the drawer).
+    // Only hold a fetch that's actually requesting the drawer/bubble sections
+    // we ourselves repaint from.
+    var match = url.match(/[?&](?:sections|section_id)=([^&]*)/i);
+    if (!match) return false;
+    var requested = decodeURIComponent(match[1]);
+    return /cart-drawer|cart-icon-bubble/i.test(requested);
   }
 
   // Intercept window.fetch

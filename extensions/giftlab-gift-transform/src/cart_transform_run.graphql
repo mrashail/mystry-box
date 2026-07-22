@@ -1,0 +1,49 @@
+query CartTransformRunInput {
+  cart {
+    attribute(key: "_giftlab_declined_gifts") {
+      value
+    }
+    buyerIdentity {
+      customer {
+        id
+      }
+    }
+    lines {
+      id
+      quantity
+      cost {
+        amountPerQuantity {
+          amount
+          currencyCode
+        }
+        subtotalAmount {
+          amount
+          currencyCode
+        }
+      }
+      merchandise {
+        __typename
+        ... on ProductVariant {
+          id
+          sku
+          product {
+            id
+            vendor
+            productType
+          }
+        }
+      }
+      freeGiftRule: attribute(key: "_free_gift_rule") {
+        value
+      }
+      promotionKind: attribute(key: "_promotion_kind") {
+        value
+      }
+    }
+  }
+  cartTransform {
+    metafield(namespace: "$app:giftlab-cart-transform", key: "rules-config") {
+      value
+    }
+  }
+}
