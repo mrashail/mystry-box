@@ -66,10 +66,10 @@
   // count was the original bug: a stale/missing count flagged a full cart as
   // empty and left it stuck hidden.
   function syncEmptyStateFromDoc(doc) {
-    var fresh = doc.querySelector("#CartDrawer, cart-drawer");
+    var fresh = doc.querySelector("#CartDrawer, cart-drawer, .drawer");
     if (!fresh) return;
-    var isEmpty = fresh.classList.contains("is-empty");
-    document.querySelectorAll("#CartDrawer, cart-drawer").forEach(function (el) {
+    var isEmpty = fresh.classList.contains("is-empty") || doc.querySelector(".drawer__inner-empty") !== null;
+    document.querySelectorAll("#CartDrawer, cart-drawer, .drawer").forEach(function (el) {
       if (isEmpty) el.classList.add("is-empty");
       else el.classList.remove("is-empty");
     });
@@ -761,19 +761,7 @@
     console.log("GiftLab intercepted fetch. URL:", requestUrl, "isInternal:", isInternal);
 
     if (!isInternal && isCartSectionRender(requestUrl)) {
-      // Hold the theme's cart repaint until any in-flight gift/mystery
-      // evaluation has finished adding its lines, then let it proceed — so the
-      // theme paints the drawer exactly once, with the gift already present.
-      // No second paint, no empty-then-fill flicker, no visible delay.
-      console.log("GiftLab: holding theme cart render until evaluation settles...");
-      pendingRenderHold = true;
-      // Safety net: never hold the theme's own repaint for more than 3s, even
-      // if an evaluation stalls on a hung network request. A slightly-stale
-      // paint is always better than a drawer that never fills.
-      var holdGuard = new Promise(function (resolve) { setTimeout(resolve, 3000); });
-      return Promise.race([currentEvaluatePromise, holdGuard]).then(function () {
-        return originalFetch.apply(window, args);
-      });
+      return originalFetch.apply(window, args);
     }
 
     return originalFetch.apply(window, args).then(function (response) {
