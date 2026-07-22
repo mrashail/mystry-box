@@ -355,7 +355,9 @@
   // re-adds whatever the shopper just removed (see DECLINED_GIFTS_ATTRIBUTE
   // above for how the decline itself is remembered).
   function evaluateRulesLocally(rules, cart, previousCart) {
-    var matchedRules = [];
+    // Native CartTransform handles line expansion on Shopify's server.
+    // Client-side JS must NOT generate standalone /cart/add.js mutations.
+    return [];
     rules.forEach(function (rule) {
       var conditions = rule.conditions || [];
       var match = false;
@@ -612,41 +614,24 @@
       cachedCart = cart;
       console.log("GiftLab cart items count:", cart.items.length, "Subtotal:", cart.items_subtotal_price);
 
-      var didMutate = false;
-
-      // Try local evaluation first (instant, covers simple free gifts)
-      var localMutations = evaluateRulesLocally(cachedRules, cart, previousCart);
-      console.log("GiftLab local evaluation mutations result:", localMutations);
-
-      if (localMutations.length > 0) {
-        var addedGift = false;
-        var latestSections = null;
-        for (var k = 0; k < localMutations.length; k += 1) {
-          var mut = localMutations[k];
-          var r = await applyMutation(mut);
-          if (r) {
-            patchCachedCartForMutation(mut);
-            if (!mut.silent) didMutate = true;
-            if (mut.type === "ADD") addedGift = true;
-            if (r.sections) latestSections = r.sections;
-          }
+      // Clean up any stale standalone gift lines added by old client-side JS
+      var staleUpdates = {};
+      var hasStaleGifts = false;
+      cart.items.forEach(function (item) {
+        if (item.properties && (item.properties._free_gift_rule || item.properties._promotion_kind === "free_gift")) {
+          staleUpdates[item.key] = 0;
+          hasStaleGifts = true;
         }
-        // Only announce "gift added" when a gift was actually added this
-        // cycle — a pure removal (the qualifying item left the cart, or the
-        // shopper just declined the gift) must never show this message.
-        await finalizeRender(didMutate, addedGift ? (config.dataset.giftMessage || "A free gift has been added to your cart.") : "", latestSections);
+      });
+      if (hasStaleGifts) {
+        console.log("GiftLab cleaning stale standalone gift items from cart...", staleUpdates);
+        await post("cart/update.js", { updates: staleUpdates });
+        await refreshCartSections();
         return;
       }
 
-      // Fallback: Send cart to evaluation server for complex/mystery box validations
-      console.log("GiftLab sending cart to evaluation server for fallback check...");
-      var response = await fetch(getUrl("apps/giftlab/evaluate"), { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json", "X-GiftLab-Internal": "1" }, body: JSON.stringify({ cart: cart, customer: customer(), country: config.dataset.country || undefined }) });
-      if (!response.ok) {
-        console.warn("GiftLab evaluate server returned error status:", response.status);
-        return;
-      }
-      var result = await response.json();
-      console.log("GiftLab evaluation server response:", result);
+      // Native CartTransform handles complex line expansion on Shopify's server.
+      return;
 
       if (!result.mutations || !result.mutations.length) {
         console.log("GiftLab: No mutations needed.");
