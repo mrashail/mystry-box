@@ -233,3 +233,72 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
     console.log("Successfully synced CartTransform rules metafield for shop:", shop, "metafieldValue:", metafieldValue);
   }
 }
+
+// Lets the storefront client cheaply tell "does this cart contain a mystery
+// box parent line?" from just the variant id — no server round trip needed
+// for carts that don't have one. This is NOT read by the Cart Transform
+// Function (mystery boxes are real single lines already visible in the
+// drawer/cart page; they don't have the gift's "invisible in the drawer"
+// problem), so there's no cartTransformId-owned copy, only the shop-level one.
+export async function syncMysteryBoxConfig(admin: AdminClient, shop: string): Promise<void> {
+  const boxes = await prisma.mysteryBox.findMany({
+    where: { shop, enabled: true },
+    orderBy: { priority: "asc" },
+  });
+
+  const now = new Date();
+  const activeBoxes = boxes.filter((box) => {
+    if (box.startsAt && new Date(box.startsAt) > now) return false;
+    if (box.endsAt && new Date(box.endsAt) < now) return false;
+    return true;
+  });
+
+  const formattedBoxes = activeBoxes.map((box) => ({
+    id: box.id,
+    name: box.name,
+    parentVariantId: box.parentVariantId ? String(numericShopifyId(box.parentVariantId)) : null,
+    boxVariantId: box.boxVariantId ? String(numericShopifyId(box.boxVariantId)) : null,
+    isBogo: Boolean((box.bogo as { enabled?: boolean } | null)?.enabled),
+  }));
+
+  const metafieldValue = JSON.stringify(formattedBoxes);
+
+  const shopRes = await admin.graphql(`query GetShopIdForMystery { shop { id } }`);
+  const shopData = (await shopRes.json()) as any;
+  const shopId = shopData.data?.shop?.id;
+  if (!shopId) {
+    console.error("Could not resolve shop id to sync mystery-config metafield for shop:", shop);
+    return;
+  }
+
+  const response = await admin.graphql(
+    `#graphql
+    mutation SetMysteryConfigMetafield($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields { id }
+        userErrors { field message }
+      }
+    }`,
+    {
+      variables: {
+        metafields: [
+          {
+            ownerId: shopId,
+            namespace: "$app:giftlab-gift-transform",
+            key: "mystery-config",
+            type: "json",
+            value: metafieldValue,
+          },
+        ],
+      },
+    },
+  );
+
+  const json = (await response.json()) as any;
+  const userErrors = json.data?.metafieldsSet?.userErrors;
+  if (userErrors && userErrors.length > 0) {
+    console.error("User errors setting mystery-config metafield:", userErrors);
+  } else {
+    console.log("Successfully synced mystery-config metafield for shop:", shop, "metafieldValue:", metafieldValue);
+  }
+}

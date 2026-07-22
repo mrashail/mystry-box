@@ -933,6 +933,113 @@ async function mysteryMutations(
   return { mutations, matchedIds, messages };
 }
 
+// Mystery-box-only evaluation, deliberately separate from evaluateCart (which
+// also computes free-gift mutations). The storefront client already owns the
+// entire free-gift decision locally (conditions, decline-tracking, priority/
+// stacking) and must never have that overridden or duplicated by a mixed
+// server response — so this path returns ONLY mystery mutations, called
+// solely to attach/refresh the hidden random pick on a mystery box line,
+// which genuinely requires the server (randomness, inventory, per-customer
+// history, and the persisted MysterySelection roll all live here only).
+export async function evaluateMysteryOnly(
+  shop: string,
+  cart: CartSnapshot,
+): Promise<{ mutations: CartMutation[]; messages: string[]; matchedMysteryBoxIds: string[] }> {
+  const [settings, allBoxes, dynamicCatalog, priorUsage] = await Promise.all([
+    prisma.shopSettings.upsert({ where: { shop }, update: {}, create: { shop } }),
+    prisma.mysteryBox.findMany({
+      where: { shop, enabled: true },
+      include: { children: { orderBy: { position: "asc" } } },
+      orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
+    }),
+    prisma.catalogVariant.findMany({ where: { shop } }),
+    cart.customer?.id
+      ? prisma.promotionUsage.findMany({
+          where: { shop, customerId: cart.customer.id },
+          select: { promotionType: true, promotionId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+  if (!settings.storefrontEnabled)
+    return { mutations: [], messages: [], matchedMysteryBoxIds: [] };
+  let secret = settings.promotionSecret;
+  if (!secret) {
+    secret = randomUUID();
+    await prisma.shopSettings.update({ where: { shop }, data: { promotionSecret: secret } });
+  }
+
+  const catalogByVariant = new Map(
+    dynamicCatalog.map((item) => [numericShopifyId(item.variantId), item]),
+  );
+  cart.lines = cart.lines.map((line) => {
+    const catalog = catalogByVariant.get(numericShopifyId(line.variantId));
+    return catalog
+      ? {
+          ...line,
+          sku: line.sku || catalog.sku || undefined,
+          vendor: catalog.vendor || undefined,
+          productType: catalog.productType || undefined,
+          tags: asArray<string>(catalog.tags),
+          collectionIds: asArray<string>(catalog.collectionIds),
+        }
+      : line;
+  });
+
+  const used = new Set(
+    priorUsage.map((usage) => `${usage.promotionType}:${usage.promotionId}`),
+  );
+  const rawBoxes = allBoxes.filter((box) => {
+    const restrictions = (box.restrictions ?? {}) as unknown as CustomerRestrictions;
+    return !restrictions.onePerCustomer || !used.has(`MYSTERY:${box.id}`);
+  });
+  const boxes: BoxWithChildren[] = rawBoxes.map((box) => {
+    const rules = asArray<MatchingRule>(box.matchingRules);
+    if (!rules.length) return box;
+    const known = new Set(box.children.map((child) => child.variantId));
+    const dynamic = dynamicCatalog
+      .filter(
+        (child) =>
+          !known.has(child.variantId) && matchingDynamicChild(child, rules),
+      )
+      .map((child, position) => ({
+        id: `dynamic-${child.id}`,
+        mysteryBoxId: box.id,
+        productId: child.productId,
+        productTitle: child.productTitle,
+        variantId: child.variantId,
+        variantTitle: child.variantTitle,
+        sku: child.sku,
+        imageUrl: child.imageUrl,
+        inventoryQuantity: child.inventoryQuantity,
+        available: child.available,
+        weight: 1,
+        position: box.children.length + position,
+        createdAt: child.createdAt,
+        updatedAt: child.updatedAt,
+      }));
+    return { ...box, children: [...box.children, ...dynamic] };
+  });
+
+  const customerHistory = new Map<string, Set<string>>();
+  if (cart.customer?.id && boxes.length) {
+    const historyRows = await prisma.mysteryCustomerHistory.findMany({
+      where: {
+        shop,
+        customerId: cart.customer.id,
+        mysteryBoxId: { in: boxes.map((box) => box.id) },
+      },
+      select: { mysteryBoxId: true, variantId: true },
+    });
+    for (const row of historyRows) {
+      const set = customerHistory.get(row.mysteryBoxId) ?? new Set<string>();
+      set.add(row.variantId);
+      customerHistory.set(row.mysteryBoxId, set);
+    }
+  }
+  const mystery = await mysteryMutations(shop, boxes, cart, secret, catalogByVariant, customerHistory);
+  return { mutations: mystery.mutations, messages: mystery.messages, matchedMysteryBoxIds: mystery.matchedIds };
+}
+
 export async function evaluateCart(
   shop: string,
   cart: CartSnapshot,

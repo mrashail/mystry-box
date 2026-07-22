@@ -6,6 +6,7 @@ import {
 } from "../components/MysteryBoxEditor";
 import { mysteryFormData } from "../lib/forms.server";
 import { syncMysteryBoxProduct } from "../lib/mystery-box-product.server";
+import { syncMysteryBoxConfig } from "../lib/cart-transform.server";
 import {
   createPromotionDiscount,
   deletePromotionDiscount,
@@ -140,6 +141,7 @@ export async function action({ request, params }: ActionFunctionArgs) {
       },
     }),
   ]);
+  await syncMysteryBoxConfig(admin, session.shop);
   // Stay on this box's own edit page after saving instead of the rules list.
   return redirect(`/app/mystery-boxes/${box.id}`);
 }

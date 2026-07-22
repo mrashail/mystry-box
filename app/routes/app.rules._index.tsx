@@ -8,7 +8,7 @@ import {
   deletePromotionDiscount,
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
-import { syncCartTransformRules } from "../lib/cart-transform.server";
+import { syncCartTransformRules, syncMysteryBoxConfig } from "../lib/cart-transform.server";
 import { deleteMysteryBoxProduct, syncMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { MetricTile } from "../components/MetricTile";
 
@@ -318,6 +318,7 @@ export async function action({ request }: ActionFunctionArgs) {
         },
       });
     }
+    await syncMysteryBoxConfig(admin, session.shop);
   }
 
   return { ok: true };

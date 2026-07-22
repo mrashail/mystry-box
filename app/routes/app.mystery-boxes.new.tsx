@@ -4,6 +4,7 @@ import { MysteryBoxEditor } from "../components/MysteryBoxEditor";
 import { mysteryFormData } from "../lib/forms.server";
 import { syncMysteryBoxProduct, deleteMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { createPromotionDiscount, deletePromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
+import { syncMysteryBoxConfig } from "../lib/cart-transform.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -115,6 +116,7 @@ export async function action({ request }: ActionFunctionArgs) {
       { status: 500 },
     );
   }
+  await syncMysteryBoxConfig(admin, session.shop);
   // Land on the new box's own edit page so the merchant stays in the form.
   return redirect(`/app/mystery-boxes/${createdBox.id}`);
 }

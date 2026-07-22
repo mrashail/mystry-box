@@ -26,6 +26,7 @@
   var pendingRenderHold = false;
 
   var cachedRules = [];
+  var cachedMysteryBoxes = [];
   var cachedCart = null;
   var rulesLoadPromise = null;
 
@@ -93,6 +94,74 @@
       cachedRules = JSON.parse(rulesEl.textContent);
       console.log("GiftLab instant rules loaded from Liquid DOM:", cachedRules);
     } catch (e) {}
+  }
+
+  // Same instant-load pattern for the mystery box identity list (id +
+  // parent/box variant ids only — enough to spot "this cart line is a
+  // mystery box" without a round trip; the actual random pick always comes
+  // from the server, see runMysteryReconcile).
+  var mysteryEl = document.getElementById("giftlab-mystery-data");
+  if (mysteryEl && mysteryEl.textContent) {
+    try {
+      cachedMysteryBoxes = JSON.parse(mysteryEl.textContent);
+      console.log("GiftLab instant mystery box list loaded from Liquid DOM:", cachedMysteryBoxes);
+    } catch (e) {}
+  }
+
+  // Any cart line whose variant matches a known mystery box's parent/shadow
+  // variant. Standard boxes set parentVariantId === boxVariantId (the shopper
+  // adds the shadow product directly); BOGO boxes trigger off a different real
+  // product, so parentVariantId is the one that matters there.
+  function findMysteryBoxLines(cart) {
+    if (!cachedMysteryBoxes || !cachedMysteryBoxes.length || !cart || !cart.items) return [];
+    return cart.items.filter(function (item) {
+      var itemVid = numericId(item.variant_id);
+      return cachedMysteryBoxes.some(function (box) {
+        return (box.parentVariantId && numericId(box.parentVariantId) === itemVid) ||
+          (box.boxVariantId && numericId(box.boxVariantId) === itemVid);
+      });
+    });
+  }
+
+  // Attaches/refreshes the hidden random pick on a mystery box line. This
+  // MUST be server-side (randomness, inventory, per-customer history, and the
+  // persisted MysterySelection roll all live only there — see
+  // evaluateMysteryOnly in promotion-engine.server.ts). It's a silent property
+  // update on a line the shopper already sees (the box itself was already
+  // added natively, instantly, by the theme) — never a separate add, so there
+  // is no flash. A cart with no mystery box line never calls this at all.
+  async function runMysteryReconcile(cart) {
+    try {
+      var response = await fetch(getUrl("apps/giftlab/mystery"), {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", "X-GiftLab-Internal": "1" },
+        body: JSON.stringify({ cart: cart, customer: customer(), country: config.dataset.country || undefined })
+      });
+      if (!response.ok) {
+        console.warn("GiftLab mystery reconcile returned error status:", response.status);
+        return null;
+      }
+      var result = await response.json();
+      console.log("GiftLab mystery reconcile result:", result);
+      if (!result.mutations || !result.mutations.length) return null;
+      var didMutate = false;
+      var latestSections = null;
+      for (var i = 0; i < result.mutations.length; i += 1) {
+        var mut = result.mutations[i];
+        var r = await applyMutation(mut);
+        if (r) {
+          patchCachedCartForMutation(mut);
+          if (!mut.silent) didMutate = true;
+          if (r.sections) latestSections = r.sections;
+        }
+      }
+      return { didMutate: didMutate, sections: latestSections };
+    } catch (e) {
+      console.warn("GiftLab mystery reconcile failed:", e);
+      return null;
+    }
   }
 
   async function loadRulesAndCart() {
@@ -708,6 +777,8 @@
       console.log("GiftLab cart items count:", cart.items.length, "Subtotal:", cart.items_subtotal_price);
 
       var didMutate = false;
+      var latestSections = null;
+      var giftMessage = "";
 
       // Try local evaluation first (instant, covers simple free gifts)
       var localMutations = evaluateRulesLocally(cachedRules, cart, previousCart);
@@ -715,8 +786,6 @@
 
       if (localMutations.length > 0) {
         var addedGift = false;
-        var giftMessage = "";
-        var latestSections = null;
         for (var k = 0; k < localMutations.length; k += 1) {
           var mut = localMutations[k];
           var r = await applyMutation(mut);
@@ -731,15 +800,26 @@
             if (r.sections) latestSections = r.sections;
           }
         }
-        var finalMessage = addedGift ? (giftMessage || config.dataset.giftMessage || "A free gift has been added to your cart.") : "";
-        await finalizeRender(didMutate, finalMessage, latestSections);
-        return;
+        if (addedGift) giftMessage = giftMessage || config.dataset.giftMessage || "A free gift has been added to your cart.";
       }
-      // No local mutation needed: the cart already matches what the rules
-      // want (gift present and still qualifying, or nothing qualifies). The
-      // checkout Discount Function keeps the gift line at $0, and the native
-      // Cart Transform Function is a no-JS safety net at checkout — neither
-      // needs anything more from us here.
+      // No local gift mutation needed: the cart already matches what the
+      // rules want (gift present and still qualifying, or nothing qualifies).
+      // The checkout Discount Function keeps the gift line at $0, and the
+      // native Cart Transform Function is a no-JS safety net at checkout.
+
+      // Mystery boxes are an entirely independent concern from free gifts —
+      // check regardless of what the gift pass above did. A cart with no
+      // mystery box line never calls the server at all.
+      var mysteryLines = findMysteryBoxLines(cart);
+      if (mysteryLines.length > 0) {
+        var mysteryResult = await runMysteryReconcile(cart);
+        if (mysteryResult) {
+          if (mysteryResult.didMutate) didMutate = true;
+          if (mysteryResult.sections) latestSections = mysteryResult.sections;
+        }
+      }
+
+      await finalizeRender(didMutate, giftMessage, latestSections);
       return;
     } catch (error) {
       console.warn("GiftLab cart evaluation failed with error:", error);

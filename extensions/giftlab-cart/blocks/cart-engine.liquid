@@ -16,6 +16,13 @@
     []
   {%- endif -%}
 </script>
+<script id="giftlab-mystery-data" type="application/json">
+  {%- if shop.metafields['$app:giftlab-gift-transform']['mystery-config'] -%}
+    {{ shop.metafields['$app:giftlab-gift-transform']['mystery-config'].value | json }}
+  {%- else -%}
+    []
+  {%- endif -%}
+</script>
 
 {% schema %}
 {
