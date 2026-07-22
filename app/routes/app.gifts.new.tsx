@@ -31,8 +31,9 @@ export async function action({ request }: ActionFunctionArgs) {
     }
   }
 
+  let created;
   try {
-    await prisma.giftRule.create({ data: {
+    created = await prisma.giftRule.create({ data: {
       shop: session.shop, name, description: text(form, "description") || null,
       enabled, priority: integer(form, "priority", 100, 1), matchMode: text(form, "matchMode", "ALL"),
       conditions: prismaJson(json<RuleCondition[]>(form, "conditions", [])), gifts: prismaJson(gifts), allowMultiple: checked(form, "allowMultiple"), maxGifts: integer(form, "maxGifts", 1, 1), stackable: checked(form, "stackable"),
@@ -50,7 +51,9 @@ export async function action({ request }: ActionFunctionArgs) {
       { status: 500 },
     );
   }
-  return redirect("/app/rules");
+  // Land on the new rule's own edit page (not the rules list) so the merchant
+  // stays in the form and can keep editing what they just created.
+  return redirect(`/app/gifts/${created.id}`);
 }
 
 export default function NewGiftRule() {

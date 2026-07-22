@@ -59,7 +59,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
     restrictions: { onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) },
   } });
   await syncCartTransformRules(admin, session.shop);
-  return redirect("/app/rules");
+  // Stay on the rule's own edit page after saving (reloads with the freshly
+  // saved values) instead of bouncing back to the rules list, so the merchant
+  // can keep tweaking the same rule.
+  return redirect(`/app/gifts/${current.id}`);
 }
 
 export default function EditGiftRule() {
