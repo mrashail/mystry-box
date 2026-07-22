@@ -165,6 +165,24 @@ fn cart_transform_run(
                 continue;
             }
 
+            // The storefront client adds the free gift as a REAL cart line (so
+            // it shows in the theme cart drawer, which reads /cart.js — a layer
+            // this Cart Transform never reaches). When that real line is
+            // present, expanding here too would put the gift in the cart TWICE
+            // at checkout. So skip any rule whose gift line the client already
+            // added; this function then only acts as a no-JS safety net,
+            // materialising the gift at checkout for shoppers whose browser
+            // never ran the client add.
+            let already_added = input.cart().lines().iter().any(|l| {
+                l.free_gift_rule()
+                    .and_then(|a| a.value())
+                    .map(|s| s.as_str())
+                    == Some(rule.id.as_str())
+            });
+            if already_added {
+                continue;
+            }
+
             let matches = if rule.conditions.is_empty() {
                 true
             } else if rule.match_mode == "ANY" {

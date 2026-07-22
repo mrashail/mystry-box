@@ -10,7 +10,11 @@
   data-show-notifications="{{ block.settings.show_notifications }}"
 ></div>
 <script id="giftlab-rules-data" type="application/json">
-  {{ shop.metafields['$app:giftlab-gift-transform']['rules-config'].value | default: '[]' }}
+  {%- if shop.metafields['$app:giftlab-gift-transform']['rules-config'] -%}
+    {{ shop.metafields['$app:giftlab-gift-transform']['rules-config'].value | json }}
+  {%- else -%}
+    []
+  {%- endif -%}
 </script>
 
 {% schema %}

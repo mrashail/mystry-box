@@ -1,5 +1,10 @@
 import prisma from "../db.server";
-import { numericShopifyId } from "./promotion-engine.server";
+import {
+  numericShopifyId,
+  promotionSignature,
+  encodeConditionsForFunction,
+} from "./promotion-engine.server";
+import { ensurePromotionSecret } from "./checkout-discount.server";
 import type { RuleCondition } from "./promotions.types";
 
 interface AdminClient {
@@ -119,6 +124,14 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
     orderBy: { priority: "asc" },
   });
 
+  // The storefront client adds the gift as a REAL cart line and the checkout
+  // Discount Function ($giftlab-checkout-discounts) later zeroes it — but only
+  // if the line carries a valid HMAC signature over its rule/gift/conditions.
+  // So the synced rules must ship each gift's signature + conditions blob (the
+  // exact same encoding the app-proxy evaluate loader produces), letting the
+  // client attach signed properties synchronously with no extra round trip.
+  const secret = await ensurePromotionSecret(shop);
+
   const now = new Date();
   const validRules = rules.filter((rule) => {
     if (rule.startsAt && new Date(rule.startsAt) > now) return false;
@@ -127,13 +140,25 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
   });
 
   const formattedRules = validRules.map((rule) => {
+    const { blob: conditionsBlob, unverifiable } = encodeConditionsForFunction(
+      rule.matchMode || "ALL",
+      (rule.conditions as unknown as RuleCondition[]) || [],
+    );
     const rawGifts = (rule.gifts as any[]) || [];
-    const gifts = rawGifts.map((gift) => ({
-      variantId: String(numericShopifyId(gift.variantId || gift.variant_id)),
-      quantity: gift.quantity || 1,
-      discountType: gift.discountType || "FREE",
-      discountValue: gift.discountValue ?? 100,
-    }));
+    const gifts = rawGifts.map((gift) => {
+      const variantId = String(numericShopifyId(gift.variantId || gift.variant_id));
+      const quantity = Math.max(1, gift.quantity || 1);
+      const discountType = gift.discountType || "FREE";
+      const discountValue = gift.discountValue ?? 100;
+      const signature = promotionSignature(
+        secret,
+        variantId,
+        "free_gift_discount",
+        rule.id,
+        `${discountType}|${discountValue}|${quantity}|${unverifiable ? "UNVERIFIABLE" : conditionsBlob}`,
+      );
+      return { variantId, quantity, discountType, discountValue, signature };
+    });
 
     const restrictions = (rule.restrictions as any) || {};
 
@@ -143,6 +168,8 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
       matchMode: rule.matchMode || "ALL",
       conditions: (rule.conditions as unknown as RuleCondition[]) || [],
       gifts,
+      conditionsBlob,
+      unverifiable,
       allowMultiple: rule.allowMultiple || false,
       maxGifts: rule.maxGifts || 1,
       stackable: rule.stackable || false,
