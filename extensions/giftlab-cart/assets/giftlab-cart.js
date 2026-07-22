@@ -743,6 +743,36 @@
     return /cart-drawer|cart-icon-bubble/i.test(requested);
   }
 
+  function buildGiftItemPayload(rule, gift) {
+    return {
+      id: gift.variantId,
+      quantity: gift.quantity,
+      properties: {
+        _free_gift_rule: rule.id,
+        _promotion_kind: "free_gift",
+        _free_gift_discount_type: gift.discountType,
+        _free_gift_discount_value: String(gift.discountValue),
+        _free_gift_qty: String(gift.quantity),
+        _free_gift_name: rule.name,
+        _promotion_signature: gift.signature || "",
+        "Free gift": rule.name
+      }
+    };
+  }
+
+  function getMatchingGiftsForPayload(items) {
+    if (!cachedRules || !cachedRules.length) return [];
+    var giftsToAdd = [];
+    cachedRules.forEach(function (rule) {
+      if (rule.gifts && rule.gifts.length > 0) {
+        rule.gifts.forEach(function (g) {
+          giftsToAdd.push(buildGiftItemPayload(rule, g));
+        });
+      }
+    });
+    return giftsToAdd;
+  }
+
   // Intercept window.fetch
   var originalFetch = window.fetch;
   window.fetch = function () {
@@ -754,6 +784,28 @@
 
     if (!isInternal && isCartSectionRender(requestUrl)) {
       return originalFetch.apply(window, args);
+    }
+
+    // Intercept single Add-to-Cart calls to batch the gift item into the VERY FIRST request (Zero Delay!)
+    if (!isInternal && (requestUrl.indexOf("/cart/add") !== -1)) {
+      try {
+        var options = args[1] || {};
+        if (options.body && typeof options.body === "string" && options.body.indexOf("{") === 0) {
+          var payload = JSON.parse(options.body);
+          var items = payload.items || (payload.id ? [payload] : []);
+          var gifts = getMatchingGiftsForPayload(items);
+          if (gifts.length > 0) {
+            console.log("GiftLab batching gift items into primary add.js payload...", gifts);
+            payload.items = items.concat(gifts);
+            delete payload.id;
+            delete payload.quantity;
+            delete payload.properties;
+            options.body = JSON.stringify(payload);
+          }
+        }
+      } catch (e) {
+        console.warn("GiftLab failed to batch add payload:", e);
+      }
     }
 
     return originalFetch.apply(window, args).then(function (response) {
