@@ -355,9 +355,7 @@
   // re-adds whatever the shopper just removed (see DECLINED_GIFTS_ATTRIBUTE
   // above for how the decline itself is remembered).
   function evaluateRulesLocally(rules, cart, previousCart) {
-    // Native CartTransform handles line expansion on Shopify's server.
-    // Client-side JS must NOT generate standalone /cart/add.js mutations.
-    return [];
+    var matchedRules = [];
     rules.forEach(function (rule) {
       var conditions = rule.conditions || [];
       var match = false;
@@ -630,6 +628,29 @@
         return;
       }
 
+      var didMutate = false;
+
+      // Try local evaluation first (instant, covers simple free gifts)
+      var localMutations = evaluateRulesLocally(cachedRules, cart, previousCart);
+      console.log("GiftLab local evaluation mutations result:", localMutations);
+
+      if (localMutations.length > 0) {
+        var addedGift = false;
+        var latestSections = null;
+        for (var k = 0; k < localMutations.length; k += 1) {
+          var mut = localMutations[k];
+          var r = await applyMutation(mut);
+          if (r) {
+            patchCachedCartForMutation(mut);
+            if (!mut.silent) didMutate = true;
+            if (mut.type === "ADD") addedGift = true;
+            if (r.sections) latestSections = r.sections;
+          }
+        }
+        await finalizeRender(didMutate, addedGift ? (config.dataset.giftMessage || "A free gift has been added to your cart.") : "", latestSections);
+        return;
+      }
+
       // Native CartTransform handles complex line expansion on Shopify's server.
       return;
 
@@ -738,8 +759,9 @@
     return originalFetch.apply(window, args).then(function (response) {
       if (!isInternal && isCartAction(requestUrl)) {
         if (response.ok) {
-          console.log("GiftLab: External cart fetch succeeded. Native CartTransform handling line expansion.");
+          console.log("GiftLab: External cart fetch succeeded. Triggering instant evaluate()...");
           pendingRenderHold = false;
+          evaluate();
         }
       }
       return response;
@@ -761,7 +783,8 @@
       console.log("GiftLab intercepted XHR. URL:", requestUrl, "isInternal:", isInternal);
       if (!isInternal && isCartAction(requestUrl)) {
         if (self.status >= 200 && self.status < 300) {
-          console.log("GiftLab XHR matched cart action. Native CartTransform handling line expansion.");
+          console.log("GiftLab XHR matched cart action. Triggering instant evaluate()...");
+          evaluate();
         }
       }
     });
