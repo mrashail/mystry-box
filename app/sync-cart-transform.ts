@@ -1,22 +1,27 @@
 import { unauthenticated } from "./shopify.server";
-import { syncCartTransformRules } from "./lib/cart-transform.server";
 import prisma from "./db.server";
 
 async function main() {
-  const settings = await prisma.shopSettings.findMany();
-  for (const setting of settings) {
-    console.log("Syncing CartTransform for shop:", setting.shop);
-    try {
-      const { admin } = await unauthenticated.admin(setting.shop);
-      await syncCartTransformRules(admin, setting.shop);
-      console.log("CartTransform synced successfully for:", setting.shop);
-    } catch (err) {
-      console.error("CartTransform sync error for:", setting.shop, err);
-    }
-  }
+  const shop = "mrashail-2.myshopify.com";
+  const { admin } = await unauthenticated.admin(shop);
 
-  const updatedSettings = await prisma.shopSettings.findMany();
-  console.log("Updated ShopSettings:", JSON.stringify(updatedSettings, null, 2));
+  const response = await admin.graphql(
+    `#graphql
+    mutation CreateCartTransform($functionHandle: String!) {
+      cartTransformCreate(functionHandle: $functionHandle) {
+        cartTransform { id }
+        userErrors { field message }
+      }
+    }`,
+    {
+      variables: {
+        functionHandle: "giftlab-gift-transform",
+      },
+    },
+  );
+
+  const json = await response.json();
+  console.log("CartTransformCreate Response:", JSON.stringify(json, null, 2));
 }
 
 main().catch(console.error).finally(() => prisma.$disconnect());
