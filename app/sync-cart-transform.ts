@@ -20,8 +20,17 @@ async function main() {
     },
   );
 
-  const json = await response.json();
-  console.dir(json, { depth: null });
+  try {
+    const json = await response.json();
+    console.log("JSON DATA:", JSON.stringify(json, null, 2));
+  } catch (err: any) {
+    if (err.response) {
+      const text = await err.response.text();
+      console.log("RAW TEXT RESPONSE:", text);
+    } else {
+      console.log("ERR:", err);
+    }
+  }
 }
 
 main().catch(console.error).finally(() => prisma.$disconnect());
