@@ -86,14 +86,25 @@
     return fetch(getUrl(url), { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json", "X-GiftLab-Internal": "1" }, body: JSON.stringify(body) });
   }
 
+  // Read in-memory rules directly from Liquid script tag on page load (0ms delay!)
+  var rulesEl = document.getElementById("giftlab-rules-data");
+  if (rulesEl && rulesEl.textContent) {
+    try {
+      cachedRules = JSON.parse(rulesEl.textContent);
+      console.log("GiftLab instant rules loaded from Liquid DOM:", cachedRules);
+    } catch (e) {}
+  }
+
   async function loadRulesAndCart() {
     try {
-      var custStr = encodeURIComponent(JSON.stringify(customer()));
-      var rulesResp = await fetch(getUrl("apps/giftlab/evaluate?customer=" + custStr), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1" } });
-      if (rulesResp.ok) {
-        var res = await rulesResp.json();
-        cachedRules = res.rules || [];
-        console.log("GiftLab loaded active rules list:", cachedRules);
+      if (!cachedRules || cachedRules.length === 0) {
+        var custStr = encodeURIComponent(JSON.stringify(customer()));
+        var rulesResp = await fetch(getUrl("apps/giftlab/evaluate?customer=" + custStr), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1" } });
+        if (rulesResp.ok) {
+          var res = await rulesResp.json();
+          cachedRules = res.rules || [];
+          console.log("GiftLab loaded active rules list via fallback:", cachedRules);
+        }
       }
       
       var cartResp = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1" } });

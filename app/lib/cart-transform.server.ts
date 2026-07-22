@@ -156,6 +156,29 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
 
   const metafieldValue = JSON.stringify(formattedRules);
 
+  const shopRes = await admin.graphql(`query GetShopId { shop { id } }`);
+  const shopData = (await shopRes.json()) as any;
+  const shopId = shopData.data?.shop?.id;
+
+  const metafieldsToSet: Array<{ ownerId: string; namespace: string; key: string; type: string; value: string }> = [
+    {
+      ownerId: cartTransformId,
+      namespace: "$app:giftlab-gift-transform",
+      key: "rules-config",
+      type: "json",
+      value: metafieldValue,
+    },
+  ];
+  if (shopId) {
+    metafieldsToSet.push({
+      ownerId: shopId,
+      namespace: "$app:giftlab-gift-transform",
+      key: "rules-config",
+      type: "json",
+      value: metafieldValue,
+    });
+  }
+
   const response = await admin.graphql(
     `#graphql
     mutation SetCartTransformMetafield($metafields: [MetafieldsSetInput!]!) {
@@ -166,15 +189,7 @@ export async function syncCartTransformRules(admin: AdminClient, shop: string): 
     }`,
     {
       variables: {
-        metafields: [
-          {
-            ownerId: cartTransformId,
-            namespace: "$app:giftlab-gift-transform",
-            key: "rules-config",
-            type: "json",
-            value: metafieldValue,
-          },
-        ],
+        metafields: metafieldsToSet,
       },
     },
   );

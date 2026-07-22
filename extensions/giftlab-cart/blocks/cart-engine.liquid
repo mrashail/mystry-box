@@ -9,6 +9,9 @@
   data-mystery-message="{{ block.settings.mystery_message | escape }}"
   data-show-notifications="{{ block.settings.show_notifications }}"
 ></div>
+<script id="giftlab-rules-data" type="application/json">
+  {{ shop.metafields['$app:giftlab-gift-transform']['rules-config'].value | default: '[]' }}
+</script>
 
 {% schema %}
 {
