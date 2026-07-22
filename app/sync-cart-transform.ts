@@ -21,7 +21,7 @@ async function main() {
   );
 
   const json = await response.json();
-  console.log("CartTransformCreate Response:", JSON.stringify(json, null, 2));
+  console.dir(json, { depth: null });
 }
 
 main().catch(console.error).finally(() => prisma.$disconnect());
