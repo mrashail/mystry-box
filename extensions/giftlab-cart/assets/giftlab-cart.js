@@ -155,14 +155,19 @@
     })[0];
   }
 
-  // True if the cart holds a tiered mystery box whose authoritative per-unit
-  // basePrice hasn't been learned yet (it arrives from the mystery reconcile,
-  // see mergeBoxBasePrices). Until it has, the box can't be priced reliably
-  // for a subtotal-gated gift decision, so gift ADDs are deferred.
+  // True if the cart holds a tiered mystery box we CANNOT price from any
+  // stable source yet — neither config basePrice nor Shopify's product meta
+  // (see effectiveLinePrice's preference order). Only then must a subtotal-
+  // gated gift decision be deferred until the mystery reconcile supplies the
+  // authoritative price (mergeBoxBasePrices). On the box's own product page
+  // meta IS available, so this returns false and the gift decides instantly.
   function mysteryBoxNeedsPrice(cart) {
     return findMysteryBoxLines(cart).some(function (line) {
       var box = findMysteryBoxByVariantId(line.variant_id);
-      return box && box.tiers && box.tiers.length && box.basePrice == null;
+      if (!box || !box.tiers || !box.tiers.length) return false;
+      if (box.basePrice != null) return false;
+      var meta = getKnownVariantMeta(line.variant_id);
+      return !(meta && meta.price != null);
     });
   }
 
@@ -263,18 +268,28 @@
     if (box) {
       var tier = bestMysteryTierFor(box, quantity);
       if (tier) {
-        // Prefer the box's stable per-unit basePrice from config over the cart
-        // line's own `price`: Shopify reports a line's price at LINE level
-        // (unit × quantity) transiently for ~4s right after a cart mutation,
-        // before it settles to per-unit, firing no event when it does — so
-        // pricing off the cart value in that window made a subtotal-gated gift
-        // wrongly qualify ($10 box × 5 momentarily read as $50/unit → $175).
-        // basePrice comes straight from the box's configured price (the same
-        // value syncMysteryBoxProduct writes to the shadow product), so it's
-        // both stable and authoritative. Falls back to the (settled) cart line
-        // price only when config predates basePrice.
-        var rawUnit = box.basePrice != null ? box.basePrice
-          : (item.price != null ? item.price : (item.final_price != null ? item.final_price : 0));
+        // Price the box off a STABLE per-unit source, never the cart line's
+        // own `price`: Shopify reports a line's price at LINE level (unit ×
+        // quantity) after a cart mutation with the box's tier discount — it
+        // does NOT reliably settle to per-unit here — so a $10 box × 6 reads
+        // as ~$60/unit, which made a subtotal-gated gift wrongly qualify.
+        // Preference, each authoritative and stable:
+        //   1. config basePrice (available in every context once synced)
+        //   2. Shopify's own product-meta price for this variant — present on
+        //      the product page, i.e. exactly where the shopper adds the box,
+        //      and confirmed to match the real product price (the CART line is
+        //      the unreliable one here, not meta)
+        //   3. the cart line price (last resort)
+        var rawUnit = null;
+        if (box.basePrice != null) {
+          rawUnit = box.basePrice;
+        } else {
+          var boxMeta = getKnownVariantMeta(item.variant_id);
+          if (boxMeta && boxMeta.price != null) rawUnit = boxMeta.price;
+        }
+        if (rawUnit == null) {
+          rawUnit = item.price != null ? item.price : (item.final_price != null ? item.final_price : 0);
+        }
         var value = Number(tier.value) || 0;
         var discountedUnit = rawUnit;
         if (tier.adjustmentType === "PERCENT_OFF") {
