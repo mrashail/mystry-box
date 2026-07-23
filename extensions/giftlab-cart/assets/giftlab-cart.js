@@ -248,11 +248,20 @@
     var quantity = item.quantity || 0;
     var props = item.properties || {};
     if (props._free_gift_rule || props._mystery_box_reward) return 0;
-    var rawUnit = item.price != null ? item.price : (item.final_price != null ? item.final_price : 0);
     var box = findMysteryBoxByVariantId(item.variant_id);
     if (box) {
       var tier = bestMysteryTierFor(box, quantity);
       if (tier) {
+        // Use the box's stable per-unit basePrice from config, NOT the cart
+        // line's own `price`: Shopify reports a line's price at LINE level
+        // (unit × quantity) transiently right after a cart mutation, before it
+        // settles to per-unit a beat later, and fires no event when it does —
+        // pricing the box off that transient value made a subtotal-gated gift
+        // wrongly qualify ($10 box × 5 momentarily read as $50/unit → $175)
+        // and then never leave. basePrice is correct the instant it's read.
+        // Falls back to the line price only if config predates basePrice.
+        var rawUnit = box.basePrice != null ? box.basePrice
+          : (item.price != null ? item.price : (item.final_price != null ? item.final_price : 0));
         var value = Number(tier.value) || 0;
         var discountedUnit = rawUnit;
         if (tier.adjustmentType === "PERCENT_OFF") {
@@ -951,6 +960,10 @@
     var addedItems = addedJson && (addedJson.items || (addedJson.id ? [addedJson] : null));
     if (!addedItems || !addedItems.length) return null;
     var normalized = addedItems.map(function (it) {
+      // /cart/add.js reports the same PER-UNIT price/final_price as /cart.js
+      // (verified live: add.js price==cart.js price, ratio 1), so copy them
+      // straight through — matchCondition/effectiveLinePrice multiply by
+      // quantity themselves.
       return {
         key: it.key,
         id: it.id,

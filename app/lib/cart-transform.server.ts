@@ -297,6 +297,14 @@ export async function syncMysteryBoxConfig(admin: AdminClient, shop: string): Pr
       boxVariantId: box.boxVariantId ? String(numericShopifyId(box.boxVariantId)) : null,
       isBogo: Boolean((box.bogo as { enabled?: boolean } | null)?.enabled),
       maxPerOrder: box.maxPerOrder ?? null,
+      // The box's true per-unit price in CENTS. The storefront uses this to
+      // price a tiered box for gift-eligibility instead of the cart line's own
+      // `price`, which Shopify reports at line level (unit × quantity)
+      // transiently right after a cart mutation before settling to per-unit —
+      // reading that transient value made a subtotal-gated gift wrongly appear
+      // (and then never leave). A config value is stable and correct the
+      // instant it's read.
+      basePrice: box.boxVariantId ? Math.round(Number(box.boxPrice) * 100) : null,
       tiers,
     };
   });
