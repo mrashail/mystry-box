@@ -1125,33 +1125,44 @@
         // Without this, bumping quantity briefly showed the undiscounted
         // price before a follow-up call corrected it, and dropping back below
         // a tier's threshold left the old discount visibly applied for a beat.
-        if (!isRemove && newQuantity !== null && lineOrKey !== null && cachedCart && cachedCart.items && cachedMysteryBoxes && cachedMysteryBoxes.length) {
-          var targetItem = null;
-          cachedCart.items.forEach(function (item, idx) {
-            var lineNum = String(idx + 1);
-            if (lineOrKey === lineNum || lineOrKey === item.key || lineOrKey === String(item.variant_id) || lineOrKey === String(item.id)) {
-              targetItem = item;
-            }
-          });
-          // Identify the box primarily by the already-attached _mystery_box_id
-          // property, but fall back to matching the line's own variant id
-          // against the statically-loaded box config (available instantly at
-          // page load, no server round trip) when that property isn't there
-          // yet — e.g. the shopper changes quantity fast enough that the
-          // first silent reconcile after add hasn't attached it yet. Without
-          // this fallback the tier would simply not apply on that one change,
-          // reintroducing the exact flash this fix exists to remove.
-          var mBoxId = targetItem && targetItem.properties && targetItem.properties._mystery_box_id;
-          var mBox = mBoxId && cachedMysteryBoxes.filter(function (b) { return b.id === mBoxId; })[0];
-          if (!mBox && targetItem) {
-            var targetVid = numericId(targetItem.variant_id);
-            mBox = cachedMysteryBoxes.filter(function (b) {
-              return (b.parentVariantId && numericId(b.parentVariantId) === targetVid) ||
-                (b.boxVariantId && numericId(b.boxVariantId) === targetVid);
-            })[0];
+        if (!isRemove && newQuantity !== null && lineOrKey !== null && cachedMysteryBoxes && cachedMysteryBoxes.length) {
+          // Identify the target line's variant id WITHOUT depending on
+          // cachedCart at all: a Shopify cart line key is always
+          // "<variantId>:<propertiesHash>", so it can be read directly off
+          // the identifier the theme itself just sent — instant, no race.
+          // cachedCart is only a fallback for the rarer case where the theme
+          // instead sent a bare `line` position index. Relying on cachedCart
+          // as the PRIMARY source failed under fast back-to-back actions
+          // (e.g. change quantity right after add): its own snapshot is only
+          // refreshed by this script's own evaluate cycle, which can still be
+          // in flight and not yet even contain the just-added line at all —
+          // confirmed live (verified via automated 0-delay repro).
+          var targetVariantId = null;
+          var targetExistingProperties = null;
+          var lineOrKeyStr = String(lineOrKey);
+          var colonIdx = lineOrKeyStr.indexOf(":");
+          if (colonIdx !== -1) {
+            targetVariantId = numericId(lineOrKeyStr.slice(0, colonIdx));
+          } else if (/^\d{6,}$/.test(lineOrKeyStr)) {
+            // A long bare digit string sent as `id` is a variant id directly
+            // (rather than a short `line` position index like "1" or "2").
+            targetVariantId = numericId(lineOrKeyStr);
           }
+          if (cachedCart && cachedCart.items) {
+            cachedCart.items.forEach(function (item, idx) {
+              var lineNum = String(idx + 1);
+              if (lineOrKey === lineNum || lineOrKey === item.key || lineOrKey === String(item.variant_id) || lineOrKey === String(item.id)) {
+                targetExistingProperties = item.properties;
+                if (!targetVariantId) targetVariantId = numericId(item.variant_id);
+              }
+            });
+          }
+          var mBox = targetVariantId && cachedMysteryBoxes.filter(function (b) {
+            return (b.parentVariantId && numericId(b.parentVariantId) === targetVariantId) ||
+              (b.boxVariantId && numericId(b.boxVariantId) === targetVariantId);
+          })[0];
           if (mBox && mBox.tiers && mBox.tiers.length) {
-            var mergedProps = buildMysteryLineProperties(targetItem.properties, mBox, newQuantity);
+            var mergedProps = buildMysteryLineProperties(targetExistingProperties, mBox, newQuantity);
             console.log("GiftLab attaching instant price-tier properties for quantity change...", mergedProps);
             if (typeof FormData !== "undefined" && options.body instanceof FormData) {
               Object.keys(mergedProps).forEach(function (pk) {
