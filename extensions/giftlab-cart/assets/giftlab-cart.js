@@ -241,7 +241,19 @@
         var r = await applyMutation(mut);
         if (r) {
           patchCachedCartForMutation(mut);
-          if (!mut.silent) didMutate = true;
+          // A CHANGE that only refreshes the hidden pick on the box's own
+          // still-present line (has _mystery_box_id, isn't zeroing it out) has
+          // NOTHING new to show the shopper — the price/quantity were already
+          // painted instantly by the /cart/change.js interceptor the moment
+          // they clicked +/-. Triggering a second drawer repaint for it just
+          // re-renders visually-identical content a beat later, which is
+          // exactly the flicker/"jumpy" feeling reported on every quantity
+          // click. Only a genuine removal (quantity 0) or a brand new line
+          // (ADD — e.g. a BOGO bonus appearing) is an actually-visible change
+          // worth repainting for.
+          var isHiddenPickRefresh = mut.type === "CHANGE" && mut.quantity !== 0 &&
+            mut.properties && mut.properties._mystery_box_id;
+          if (!mut.silent && !isHiddenPickRefresh) didMutate = true;
           if (r.sections) latestSections = r.sections;
         }
       }
@@ -353,6 +365,34 @@
     if (ariaHidden !== null) source.setAttribute("aria-hidden", ariaHidden);
   }
 
+  // Best-effort UI polish: once a mystery box line's quantity has reached its
+  // configured maxPerOrder, disable that specific line's "+" stepper (and cap
+  // the input's own max attribute) so the shopper visibly can't ask for
+  // more — matching Dawn's own `data-quantity-variant-id` markup convention
+  // (shared by most Dawn-derived themes too). This is a best-effort UI touch
+  // on top of the REAL enforcement, which is the /cart/add.js|change.js
+  // interceptors clamping the actual cart — that stays authoritative
+  // regardless of whether a given theme's markup happens to match this
+  // pattern, so nothing here can let a shopper actually exceed the cap even
+  // if this cosmetic pass finds nothing to disable.
+  function enforceMysteryQuantityCaps() {
+    if (!cachedMysteryBoxes || !cachedMysteryBoxes.length) return;
+    try {
+      document.querySelectorAll("input[data-quantity-variant-id]").forEach(function (input) {
+        var vid = numericId(input.getAttribute("data-quantity-variant-id"));
+        var box = findMysteryBoxByVariantId(vid);
+        if (!box || !box.maxPerOrder) return;
+        var current = Number(input.value || input.getAttribute("data-cart-quantity") || 0);
+        input.setAttribute("max", String(box.maxPerOrder));
+        var wrapper = input.closest("quantity-input") || input.parentElement;
+        var plusButton = wrapper && wrapper.querySelector('button[name="plus"]');
+        if (plusButton) plusButton.disabled = current >= box.maxPerOrder;
+      });
+    } catch (e) {
+      console.warn("GiftLab failed to enforce mystery quantity cap on the stepper UI:", e);
+    }
+  }
+
   function updateDOMWithSections(sectionsJson) {
     console.log("GiftLab updating DOM using mutation response sections...");
     var selectors = [
@@ -401,6 +441,8 @@
         }
       }
     });
+
+    enforceMysteryQuantityCaps();
 
     document.dispatchEvent(new CustomEvent("cart:refresh"));
     // Tag this as our own update so the cart:updated listener below doesn't
@@ -839,6 +881,11 @@
         await refreshCartSections();
       }
     }
+    // Runs every evaluate cycle regardless of didMutate — cheap and
+    // idempotent — as a catch-all in case a theme repaints the drawer
+    // natively without ever dispatching a "cart:updated" event we'd
+    // otherwise catch.
+    enforceMysteryQuantityCaps();
     if (message) toast(message);
   }
 
@@ -1379,6 +1426,11 @@
     document.addEventListener("DOMContentLoaded", function () { toast(pendingToast); });
   }
   document.addEventListener("cart:updated", function (event) {
+    // Re-apply the quantity-cap UI touch regardless of who repainted the
+    // drawer (us or the theme's own native render) — this is what catches a
+    // theme's OWN native repaint, which never goes through
+    // updateDOMWithSections at all.
+    enforceMysteryQuantityCaps();
     if (event && event.detail && event.detail.source === "giftlab") return;
     console.log("GiftLab: cart:updated event received. Re-evaluating...");
     evaluate();
