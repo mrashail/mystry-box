@@ -5,7 +5,7 @@ import {
   encodeConditionsForFunction,
 } from "./promotion-engine.server";
 import { ensurePromotionSecret } from "./checkout-discount.server";
-import type { RuleCondition } from "./promotions.types";
+import type { PriceTier, RuleCondition } from "./promotions.types";
 
 interface AdminClient {
   graphql: (
@@ -253,13 +253,52 @@ export async function syncMysteryBoxConfig(admin: AdminClient, shop: string): Pr
     return true;
   });
 
-  const formattedBoxes = activeBoxes.map((box) => ({
-    id: box.id,
-    name: box.name,
-    parentVariantId: box.parentVariantId ? String(numericShopifyId(box.parentVariantId)) : null,
-    boxVariantId: box.boxVariantId ? String(numericShopifyId(box.boxVariantId)) : null,
-    isBogo: Boolean((box.bogo as { enabled?: boolean } | null)?.enabled),
-  }));
+  // Every quantity-tier discount's signature (see the identical formula in
+  // mysteryMutations, promotion-engine.server.ts:813-819) depends only on the
+  // box + tier configuration — never on the shopper's chosen quantity — so it
+  // can be precomputed once here for every configured tier instead of only
+  // at reconcile time. That's what lets the client apply the correct tier's
+  // signed properties in the SAME /cart/change.js request that changes the
+  // quantity: without this, bumping quantity showed the undiscounted price
+  // for a beat (then a follow-up call corrected it), and dropping back below
+  // a tier's threshold left the old discount visibly applied for a beat too.
+  const secret = await ensurePromotionSecret(shop);
+  const formattedBoxes = activeBoxes.map((box) => {
+    // BOGO boxes have no shadow product/boxVariantId of their own to sign a
+    // price-tier discount onto — tiers only apply to a standard priced box.
+    const tiers = !box.boxVariantId
+      ? []
+      : ((box.priceTiers as unknown as PriceTier[]) ?? [])
+          .map((tier) => {
+            const triggerProductId = String(numericShopifyId(box.parentProductId));
+            const triggerVariantId = box.parentVariantId ? String(numericShopifyId(box.parentVariantId)) : "";
+            const signature = promotionSignature(
+              secret,
+              String(numericShopifyId(box.boxVariantId as string)),
+              "price",
+              box.id,
+              `${tier.adjustmentType}|${tier.value}|${triggerProductId}|${triggerVariantId}`,
+            );
+            return {
+              minQuantity: tier.minQuantity,
+              adjustmentType: tier.adjustmentType,
+              value: tier.value,
+              triggerProductId,
+              triggerVariantId,
+              signature,
+            };
+          })
+          .sort((a, b) => b.minQuantity - a.minQuantity);
+
+    return {
+      id: box.id,
+      name: box.name,
+      parentVariantId: box.parentVariantId ? String(numericShopifyId(box.parentVariantId)) : null,
+      boxVariantId: box.boxVariantId ? String(numericShopifyId(box.boxVariantId)) : null,
+      isBogo: Boolean((box.bogo as { enabled?: boolean } | null)?.enabled),
+      tiers,
+    };
+  });
 
   const metafieldValue = JSON.stringify(formattedBoxes);
 

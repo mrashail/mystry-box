@@ -123,6 +123,50 @@
     });
   }
 
+  // The highest-minQuantity precomputed tier that still qualifies at this
+  // quantity, or null if none does (box.tiers is pre-sorted descending by
+  // minQuantity at sync time — see syncMysteryBoxConfig).
+  function bestMysteryTierFor(box, quantity) {
+    var tiers = (box && box.tiers) || [];
+    for (var i = 0; i < tiers.length; i += 1) {
+      if (tiers[i].minQuantity <= quantity) return tiers[i];
+    }
+    return null;
+  }
+
+  // Builds the properties a mystery box line should carry for a given
+  // quantity: keeps every existing property (the hidden pick bookkeeping —
+  // _mystery_box_id/_mystery_selection/_mystery_contents — must survive,
+  // since the actual pick is only refreshed a beat later by the silent server
+  // reconcile), but always starts the price-tier fields fresh so a tier that
+  // no longer qualifies doesn't leave its old discount properties behind.
+  function buildMysteryLineProperties(existingProperties, box, quantity) {
+    var properties = {};
+    if (existingProperties) {
+      Object.keys(existingProperties).forEach(function (key) {
+        if (existingProperties[key] !== null && existingProperties[key] !== undefined) {
+          properties[key] = existingProperties[key];
+        }
+      });
+    }
+    delete properties._mystery_price_type;
+    delete properties._mystery_price_value;
+    delete properties._mystery_pricing_box;
+    delete properties._mystery_trigger_product_id;
+    delete properties._mystery_trigger_variant_id;
+    delete properties._promotion_signature;
+    var tier = bestMysteryTierFor(box, quantity);
+    if (tier) {
+      properties._mystery_price_type = tier.adjustmentType;
+      properties._mystery_price_value = String(tier.value);
+      properties._mystery_pricing_box = box.id;
+      properties._mystery_trigger_product_id = tier.triggerProductId;
+      properties._mystery_trigger_variant_id = tier.triggerVariantId;
+      properties._promotion_signature = tier.signature;
+    }
+    return properties;
+  }
+
   // Attaches/refreshes the hidden random pick on a mystery box line. This
   // MUST be server-side (randomness, inventory, per-customer history, and the
   // persisted MysterySelection roll all live only there — see
@@ -1004,6 +1048,7 @@
         var options = args[1] || {};
         var isRemove = false;
         var lineOrKey = null;
+        var newQuantity = null;
         // The theme asks Shopify to re-render specific sections after the
         // change so it can repaint the drawer AND the cart-count badge. Dawn
         // (and most themes) send that list in the request BODY, not the URL —
@@ -1016,15 +1061,17 @@
         if (options.body) {
           if (typeof FormData !== "undefined" && options.body instanceof FormData) {
             var q = options.body.get("quantity");
-            if (q === "0" || q === 0) {
-              isRemove = true;
+            if (q !== null) {
+              newQuantity = Number(q);
+              if (newQuantity === 0) isRemove = true;
               lineOrKey = options.body.get("line") || options.body.get("id");
             }
             requestedSections = options.body.get("sections");
           } else if (typeof options.body === "string" && options.body.indexOf("{") === 0) {
             var p = JSON.parse(options.body);
-            if (p.quantity === 0 || p.quantity === "0") {
-              isRemove = true;
+            if (p.quantity !== undefined && p.quantity !== null) {
+              newQuantity = Number(p.quantity);
+              if (newQuantity === 0) isRemove = true;
               lineOrKey = p.line || p.id;
             }
             if (p.sections) requestedSections = p.sections;
@@ -1064,6 +1111,41 @@
               options.headers.set("Content-Type", "application/json");
             } else {
               options.headers["Content-Type"] = "application/json";
+            }
+          }
+        }
+
+        // A quantity change (not a removal) on an existing mystery box line
+        // with price tiers: attach the correct tier's already-signed
+        // properties into this SAME request, so the discount applies in the
+        // very first repaint instead of a beat later. Every signature is
+        // precomputed per-tier at sync time (see syncMysteryBoxConfig) since
+        // it depends only on the box/tier configuration, never on the
+        // quantity — so no server round trip is needed to pick the right one.
+        // Without this, bumping quantity briefly showed the undiscounted
+        // price before a follow-up call corrected it, and dropping back below
+        // a tier's threshold left the old discount visibly applied for a beat.
+        if (!isRemove && newQuantity !== null && lineOrKey !== null && cachedCart && cachedCart.items && cachedMysteryBoxes && cachedMysteryBoxes.length) {
+          var targetItem = null;
+          cachedCart.items.forEach(function (item, idx) {
+            var lineNum = String(idx + 1);
+            if (lineOrKey === lineNum || lineOrKey === item.key || lineOrKey === String(item.variant_id) || lineOrKey === String(item.id)) {
+              targetItem = item;
+            }
+          });
+          var mBoxId = targetItem && targetItem.properties && targetItem.properties._mystery_box_id;
+          var mBox = mBoxId && cachedMysteryBoxes.filter(function (b) { return b.id === mBoxId; })[0];
+          if (mBox && mBox.tiers && mBox.tiers.length) {
+            var mergedProps = buildMysteryLineProperties(targetItem.properties, mBox, newQuantity);
+            console.log("GiftLab attaching instant price-tier properties for quantity change...", mergedProps);
+            if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+              Object.keys(mergedProps).forEach(function (pk) {
+                options.body.append("properties[" + pk + "]", mergedProps[pk]);
+              });
+            } else if (typeof options.body === "string") {
+              var p3 = JSON.parse(options.body);
+              p3.properties = mergedProps;
+              options.body = JSON.stringify(p3);
             }
           }
         }
