@@ -777,7 +777,7 @@
   // not something an app can make instant, only detect and wait out.
   function cartHasUnsettledMysteryPrice(cart) {
     if (!cart || !cart.items) return false;
-    return cart.items.some(function (item) {
+    var hasLineIssue = cart.items.some(function (item) {
       var box = findMysteryBoxByVariantId(item.variant_id);
       if (!box) return false;
       var expected = mysteryBoxExpectedUnitPrice(box, item);
@@ -785,6 +785,18 @@
       var actual = item.final_price != null ? item.final_price : item.price;
       return Math.abs(actual - expected) > 1;
     });
+    if (hasLineIssue) return true;
+    // A single line's own final_price can already read correctly while the
+    // CART-level items_subtotal_price (and each line's final_line_price) is
+    // still mid-recompute — verified live: a box's per-unit final_price had
+    // already settled to $7 while the Subtotal still showed $175 instead of
+    // $35. Cross-check the cart's own reported subtotal against what our
+    // authoritative math says it should be; only "settled" once both agree.
+    if (cart.items.some(function (item) { return !!findMysteryBoxByVariantId(item.variant_id); })) {
+      var ourSubtotal = cart.items.reduce(function (sum, item) { return sum + effectiveLinePrice(item); }, 0);
+      if (Math.abs((cart.items_subtotal_price || 0) - ourSubtotal) > cart.items.length) return true;
+    }
+    return false;
   }
 
   // Polls cart.js (silent) until every mystery box line's price matches what
