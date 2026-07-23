@@ -155,6 +155,17 @@
     })[0];
   }
 
+  // True if the cart holds a tiered mystery box whose authoritative per-unit
+  // basePrice hasn't been learned yet (it arrives from the mystery reconcile,
+  // see mergeBoxBasePrices). Until it has, the box can't be priced reliably
+  // for a subtotal-gated gift decision, so gift ADDs are deferred.
+  function mysteryBoxNeedsPrice(cart) {
+    return findMysteryBoxLines(cart).some(function (line) {
+      var box = findMysteryBoxByVariantId(line.variant_id);
+      return box && box.tiers && box.tiers.length && box.basePrice == null;
+    });
+  }
+
   // How many units of this variant the cart already holds, summed across any
   // lines that share it (there's normally only one, but a raw duplicate line
   // can briefly exist before the theme/Shopify merges it).
@@ -304,7 +315,13 @@
       }
       var result = await response.json();
       console.log("GiftLab mystery reconcile result:", result);
-      if (!result.mutations || !result.mutations.length) return null;
+      // Learn each box's authoritative per-unit price (see boxPrices in
+      // apps.giftlab.mystery.tsx) so effectiveLinePrice can price a tiered box
+      // off a stable value instead of the cart line's transient inflated one.
+      var basePriceLearned = mergeBoxBasePrices(result.boxPrices);
+      if (!result.mutations || !result.mutations.length) {
+        return { didMutate: false, sections: null, basePriceLearned: basePriceLearned };
+      }
       var didMutate = false;
       var latestSections = null;
       for (var i = 0; i < result.mutations.length; i += 1) {
@@ -328,11 +345,31 @@
           if (r.sections) latestSections = r.sections;
         }
       }
-      return { didMutate: didMutate, sections: latestSections };
+      return { didMutate: didMutate, sections: latestSections, basePriceLearned: basePriceLearned };
     } catch (e) {
       console.warn("GiftLab mystery reconcile failed:", e);
       return null;
     }
+  }
+
+  // Merges server-provided authoritative per-unit box prices (cents) into
+  // cachedMysteryBoxes. Matches by box id (falling back to boxVariantId), and
+  // returns true if any box's basePrice actually changed — the caller uses
+  // that to know a deferred gift decision can now be made on a correct price.
+  function mergeBoxBasePrices(boxPrices) {
+    if (!boxPrices || !boxPrices.length || !cachedMysteryBoxes || !cachedMysteryBoxes.length) return false;
+    var changed = false;
+    boxPrices.forEach(function (bp) {
+      cachedMysteryBoxes.forEach(function (box) {
+        var match = (bp.id && box.id === bp.id) ||
+          (bp.boxVariantId && box.boxVariantId && numericId(box.boxVariantId) === numericId(bp.boxVariantId));
+        if (match && box.basePrice !== bp.basePrice) {
+          box.basePrice = bp.basePrice;
+          changed = true;
+        }
+      });
+    });
+    return changed;
   }
 
   async function loadRulesAndCart() {
@@ -1098,6 +1135,31 @@
     if (message) toast(message);
   }
 
+  // Applies a batch of gift mutations (ADD/CHANGE/remove), returning what
+  // changed so the caller can aggregate across passes. Extracted so the gift
+  // decision can run a second time once a deferred mystery box price is known.
+  async function applyGiftMutations(muts) {
+    var didMutate = false;
+    var giftMessage = "";
+    var sections = null;
+    var addedGift = false;
+    for (var k = 0; k < muts.length; k += 1) {
+      var mut = muts[k];
+      var r = await applyMutation(mut);
+      if (r) {
+        patchCachedCartForMutation(mut);
+        if (!mut.silent) didMutate = true;
+        if (mut.type === "ADD") {
+          addedGift = true;
+          if (mut.notification && !giftMessage) giftMessage = mut.notification;
+        }
+        if (r.sections) sections = r.sections;
+      }
+    }
+    if (addedGift) giftMessage = giftMessage || config.dataset.giftMessage || "A free gift has been added to your cart.";
+    return { didMutate: didMutate, giftMessage: giftMessage, sections: sections };
+  }
+
   async function runEvaluateCycle(knownCart) {
     try {
       // The rules list is fetched once on page load via the (slower, app-proxy
@@ -1132,46 +1194,31 @@
       var latestSections = null;
       var giftMessage = "";
 
-      // Try local evaluation first (instant, covers simple free gifts)
+      // Try local evaluation first (instant, covers simple free gifts).
       var localMutations = evaluateRulesLocally(cachedRules, cart, previousCart);
       console.log("GiftLab local evaluation mutations result:", localMutations);
 
-      if (localMutations.length > 0) {
-        var addedGift = false;
-        for (var k = 0; k < localMutations.length; k += 1) {
-          var mut = localMutations[k];
-          var r = await applyMutation(mut);
-          if (r) {
-            patchCachedCartForMutation(mut);
-            if (!mut.silent) didMutate = true;
-            if (mut.type === "ADD") {
-              addedGift = true;
-              // Prefer the per-rule storefront message the merchant wrote.
-              if (mut.notification && !giftMessage) giftMessage = mut.notification;
-            }
-            if (r.sections) latestSections = r.sections;
-          }
-        }
-        if (addedGift) giftMessage = giftMessage || config.dataset.giftMessage || "A free gift has been added to your cart.";
-      }
-      // No local gift mutation needed: the cart already matches what the
-      // rules want (gift present and still qualifying, or nothing qualifies).
-      // The checkout Discount Function keeps the gift line at $0, and the
-      // native Cart Transform Function is a no-JS safety net at checkout.
+      // If the cart holds a tiered mystery box whose authoritative price we
+      // don't have yet, deciding a subtotal-gated gift right now would use the
+      // cart line's transient inflated price (Shopify reports it as unit ×
+      // quantity for a few seconds after a mutation) — the exact cause of a
+      // gift wrongly appearing when 5+ boxes momentarily read as far more than
+      // they cost. Defer only the gift ADDs to after the mystery reconcile
+      // below supplies the real basePrice; removes/corrections still run now.
+      var deferGiftAdds = mysteryBoxNeedsPrice(cart);
+      var firstPass = deferGiftAdds
+        ? localMutations.filter(function (m) { return m.type !== "ADD"; })
+        : localMutations;
+      var giftApplied = await applyGiftMutations(firstPass);
+      if (giftApplied.didMutate) didMutate = true;
+      if (giftApplied.giftMessage) giftMessage = giftApplied.giftMessage;
+      if (giftApplied.sections) latestSections = giftApplied.sections;
 
-      // Mystery boxes are an entirely independent concern from free gifts —
-      // check regardless of what the gift pass above did. A cart with no
-      // mystery box line, and that never had one a moment ago either, never
-      // calls the server at all.
-      //
-      // Also fire once on the transition FROM having a box line TO not having
-      // one (previousMysteryLines but not mysteryLines) — that's the shopper
-      // just removing the box. The server's cleanup for "box no longer in
-      // cart" (deleting the persisted MysterySelection roll, so a later
-      // re-add starts fresh instead of reusing the old pick) only runs when
-      // it's actually asked to evaluate that now-box-less cart. Skipping this
-      // call on removal was exactly why re-adding the box kept giving back
-      // the very first item ever rolled for this cart, forever.
+      // Mystery boxes are an independent concern from free gifts — check
+      // regardless of what the gift pass did. Also fire on the transition FROM
+      // having a box TO not having one (shopper removed it) so the server can
+      // clean up the persisted pick. The reconcile also returns each box's
+      // authoritative basePrice (see runMysteryReconcile → mergeBoxBasePrices).
       var mysteryLines = findMysteryBoxLines(cart);
       var previousMysteryLines = previousCart ? findMysteryBoxLines(previousCart) : [];
       if (mysteryLines.length > 0 || previousMysteryLines.length > 0) {
@@ -1179,6 +1226,17 @@
         if (mysteryResult) {
           if (mysteryResult.didMutate) didMutate = true;
           if (mysteryResult.sections) latestSections = mysteryResult.sections;
+          // The deferred gift decision can now be made on the box's real
+          // price the reconcile just supplied — decide correctly (adds the
+          // gift only if the genuinely-discounted subtotal qualifies, and
+          // never flashed a wrong one because the ADD was held back above).
+          if (deferGiftAdds && mysteryResult.basePriceLearned) {
+            var corrected = evaluateRulesLocally(cachedRules, cachedCart, previousCart);
+            var giftApplied2 = await applyGiftMutations(corrected);
+            if (giftApplied2.didMutate) didMutate = true;
+            if (giftApplied2.giftMessage && !giftMessage) giftMessage = giftApplied2.giftMessage;
+            if (giftApplied2.sections) latestSections = giftApplied2.sections;
+          }
         }
       }
 
