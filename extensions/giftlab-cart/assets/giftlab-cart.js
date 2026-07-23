@@ -826,7 +826,58 @@
     });
   }
 
-  function evaluate() {
+  // Builds an accurate post-add cart snapshot purely from data the native
+  // /cart/add response already echoes back — no guessing, no extra request.
+  // Returns null (falls back to a real cart.js fetch) whenever cachedCart
+  // isn't warm yet or the response shape isn't recognized, since a merge
+  // built on a stale/missing base cart would be worse than just refetching.
+  function buildKnownCartAfterAdd(addedJson) {
+    if (!cachedCart || !cachedCart.items) return null;
+    var addedItems = addedJson && (addedJson.items || (addedJson.id ? [addedJson] : null));
+    if (!addedItems || !addedItems.length) return null;
+    var normalized = addedItems.map(function (it) {
+      return {
+        key: it.key,
+        id: it.id,
+        variant_id: it.variant_id,
+        product_id: it.product_id,
+        quantity: it.quantity,
+        price: it.price,
+        final_price: it.final_price != null ? it.final_price : it.price,
+        line_price: it.line_price != null ? it.line_price : it.price * it.quantity,
+        properties: it.properties || {},
+      };
+    });
+    var mergedItems = cachedCart.items.slice();
+    normalized.forEach(function (added) {
+      var existingIndex = mergedItems.findIndex(function (item) {
+        return item.key === added.key;
+      });
+      if (existingIndex === -1) {
+        mergedItems.push(added);
+      } else {
+        var existing = mergedItems[existingIndex];
+        mergedItems[existingIndex] = Object.assign({}, existing, added, {
+          quantity: (existing.quantity || 0) + added.quantity,
+        });
+      }
+    });
+    var subtotal = mergedItems.reduce(function (sum, item) {
+      return sum + (item.final_price != null ? item.final_price : item.price) * item.quantity;
+    }, 0);
+    return {
+      items: mergedItems,
+      items_subtotal_price: subtotal,
+      item_count: mergedItems.reduce(function (sum, item) { return sum + item.quantity; }, 0),
+    };
+  }
+
+  // knownCart, when passed, is an already-accurate post-mutation cart
+  // snapshot the caller has in hand (see the /cart/add response handling
+  // below) — skips this cycle's own cart.js re-fetch, cutting a full network
+  // round trip off the delay before a gift can be added. Omit for the normal
+  // case (fetch fresh, ground-truth state).
+  function evaluate(knownCart) {
     console.log("GiftLab evaluate() called. Running state:", running);
     if (running) {
       needsReevaluate = true;
@@ -834,11 +885,11 @@
     }
     running = true;
     needsReevaluate = false;
-    currentEvaluatePromise = runEvaluateCycleExclusive();
+    currentEvaluatePromise = runEvaluateCycleExclusive(knownCart);
     return currentEvaluatePromise;
   }
 
-  async function runEvaluateCycleExclusive() {
+  async function runEvaluateCycleExclusive(knownCart) {
     if (!tryAcquireEvalLock()) {
       // Another run holds the lock. Wait for it to finish, then run our own
       // cycle anyway (the cart may have changed again since it started, and a
@@ -852,7 +903,7 @@
       tryAcquireEvalLock();
     }
     try {
-      await runEvaluateCycle();
+      await runEvaluateCycle(knownCart);
     } finally {
       releaseEvalLock();
     }
@@ -892,7 +943,7 @@
     if (message) toast(message);
   }
 
-  async function runEvaluateCycle() {
+  async function runEvaluateCycle(knownCart) {
     try {
       // The rules list is fetched once on page load via the (slower, app-proxy
       // routed) evaluate loader. Without waiting for it here, the very first
@@ -900,17 +951,23 @@
       // `cachedRules`, and silently falls through to the much slower
       // authoritative server round-trip below on every single interaction.
       if (rulesLoadPromise) await rulesLoadPromise;
-      console.log("GiftLab fetching current cart state...");
-      var cartResponse = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1", "Cache-Control": "no-cache" } });
-      if (!cartResponse.ok) {
-        console.warn("GiftLab failed to fetch cart.js. Status:", cartResponse.status);
-        return;
-      }
       // Snapshot from the previous cycle, kept only to detect a still-
       // qualifying gift line disappearing between cycles (i.e. the shopper
       // just deleted it) — see evaluateRulesLocally's previousCart param.
       var previousCart = cachedCart;
-      var cart = await cartResponse.json();
+      var cart;
+      if (knownCart) {
+        console.log("GiftLab using the known-accurate cart from the triggering response — skipping the redundant cart.js re-fetch.");
+        cart = knownCart;
+      } else {
+        console.log("GiftLab fetching current cart state...");
+        var cartResponse = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1", "Cache-Control": "no-cache" } });
+        if (!cartResponse.ok) {
+          console.warn("GiftLab failed to fetch cart.js. Status:", cartResponse.status);
+          return;
+        }
+        cart = await cartResponse.json();
+      }
       cachedCart = cart;
       console.log("GiftLab cart items count:", cart.items.length, "Subtotal:", cart.items_subtotal_price);
 
@@ -1327,7 +1384,25 @@
         if (response.ok) {
           console.log("GiftLab: External cart fetch succeeded. Triggering instant evaluate()...");
           pendingRenderHold = false;
-          evaluate();
+          if (/cart\/add/i.test(requestUrl)) {
+            // The add response itself already echoes back the real
+            // price/product/variant data for whatever was just added — no
+            // guessing needed (unlike at intercept time, before the request
+            // was even sent, when only a bare variant id is known). Using it
+            // to build an accurate post-add cart lets this cycle skip its own
+            // cart.js re-fetch entirely, which is what used to make a
+            // subtotal-crossing add (e.g. one expensive product that alone
+            // clears the threshold) take a full extra round trip before the
+            // gift appeared — clone() so the theme's own handler still gets
+            // an unconsumed body to read.
+            response.clone().json().then(function (addedJson) {
+              evaluate(buildKnownCartAfterAdd(addedJson));
+            }).catch(function () {
+              evaluate();
+            });
+          } else {
+            evaluate();
+          }
         }
       }
       if (pendingMysteryLimitMessage) {
