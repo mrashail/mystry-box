@@ -1133,8 +1133,23 @@
               targetItem = item;
             }
           });
+          // Identify the box primarily by the already-attached _mystery_box_id
+          // property, but fall back to matching the line's own variant id
+          // against the statically-loaded box config (available instantly at
+          // page load, no server round trip) when that property isn't there
+          // yet — e.g. the shopper changes quantity fast enough that the
+          // first silent reconcile after add hasn't attached it yet. Without
+          // this fallback the tier would simply not apply on that one change,
+          // reintroducing the exact flash this fix exists to remove.
           var mBoxId = targetItem && targetItem.properties && targetItem.properties._mystery_box_id;
           var mBox = mBoxId && cachedMysteryBoxes.filter(function (b) { return b.id === mBoxId; })[0];
+          if (!mBox && targetItem) {
+            var targetVid = numericId(targetItem.variant_id);
+            mBox = cachedMysteryBoxes.filter(function (b) {
+              return (b.parentVariantId && numericId(b.parentVariantId) === targetVid) ||
+                (b.boxVariantId && numericId(b.boxVariantId) === targetVid);
+            })[0];
+          }
           if (mBox && mBox.tiers && mBox.tiers.length) {
             var mergedProps = buildMysteryLineProperties(targetItem.properties, mBox, newQuantity);
             console.log("GiftLab attaching instant price-tier properties for quantity change...", mergedProps);
