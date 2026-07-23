@@ -150,6 +150,7 @@ export default function NewMysteryBox() {
         inventoryBehavior: "IN_STOCK_ONLY",
         selectionCount: 1,
         allowDuplicateChoices: false,
+        maxPerOrder: null,
         boxPrice: 0,
         boxImageUrl: null,
         matchingRules: [],

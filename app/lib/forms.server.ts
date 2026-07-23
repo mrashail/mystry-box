@@ -36,6 +36,16 @@ export function json<T>(form: FormData, key: string, fallback: T): T {
   }
 }
 
+// For an optional numeric cap where blank/zero genuinely means "no limit" —
+// distinct from `integer()`, which always resolves a blank field to a
+// fallback rather than to "unset".
+export function integerOrNull(form: FormData, key: string, min = 1) {
+  const raw = text(form, key);
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= min ? Math.floor(value) : null;
+}
+
 export function dateOrNull(form: FormData, key: string) {
   const raw = text(form, key);
   if (!raw) return null;
@@ -60,7 +70,7 @@ export function mysteryFormData(form: FormData) {
     data: {
       name: text(form, "name"), description: text(form, "description") || null, enabled: checked(form, "enabled"), priority: integer(form, "priority", 100, 1),
       parentProductId: parent.productId, parentProductTitle: parent.productTitle, parentVariantId: parent.variantId || null, parentVariantTitle: parent.variantTitle || null,
-      selectionMethod: text(form, "selectionMethod", "RANDOM"), inventoryBehavior: text(form, "inventoryBehavior", "IN_STOCK_ONLY"), selectionCount: integer(form, "selectionCount", 1, 1), allowDuplicateChoices: checked(form, "allowDuplicateChoices"),
+      selectionMethod: text(form, "selectionMethod", "RANDOM"), inventoryBehavior: text(form, "inventoryBehavior", "IN_STOCK_ONLY"), selectionCount: integer(form, "selectionCount", 1, 1), allowDuplicateChoices: checked(form, "allowDuplicateChoices"), maxPerOrder: integerOrNull(form, "maxPerOrder", 1),
       boxPrice: decimal(form, "boxPrice", 0), boxImageUrl: text(form, "boxImageUrl") || null,
       matchingRules: prismaJson(matchingRules), priceTiers: prismaJson(priceTiers), bogo: prismaJson(bogo), restrictions: prismaJson({ onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) }), startsAt: dateOrNull(form, "startsAt"), endsAt: dateOrNull(form, "endsAt"),
     },

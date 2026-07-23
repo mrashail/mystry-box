@@ -35,6 +35,7 @@ export interface MysteryEditorValue {
   inventoryBehavior: string;
   selectionCount: number;
   allowDuplicateChoices: boolean;
+  maxPerOrder?: number | null;
   boxPrice: number;
   boxImageUrl?: string | null;
   matchingRules: MatchingRule[];
@@ -607,6 +608,13 @@ export function MysteryBoxEditor({
               name="allowDuplicateChoices"
               defaultChecked={value.allowDuplicateChoices}
             ></s-switch>
+            <s-number-field
+              label="Maximum quantity per order"
+              details="Leave blank for no limit. A shopper can't add more than this many of this box to their cart at once — useful when the child pool is small, so an order can't ask for more hidden items than the pool has."
+              min={1}
+              name="maxPerOrder"
+              value={value.maxPerOrder ? String(value.maxPerOrder) : ""}
+            ></s-number-field>
           </s-stack>
         </s-section>
 

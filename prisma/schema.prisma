@@ -91,6 +91,11 @@ model MysteryBox {
   inventoryBehavior     String   @default("IN_STOCK_ONLY")
   selectionCount        Int      @default(1)
   allowDuplicateChoices Boolean  @default(false)
+  // Hard cap on how many box units a shopper can have in their cart at once.
+  // Null means unlimited. Most useful when the child pool is small and
+  // duplicates aren't allowed — buying more than the pool size would leave
+  // later units with nothing left to pick.
+  maxPerOrder           Int?
   matchingRules         Json
   priceTiers            Json
   bogo                   Json

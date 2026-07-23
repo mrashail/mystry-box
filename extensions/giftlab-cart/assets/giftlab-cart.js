@@ -29,6 +29,11 @@
   var cachedMysteryBoxes = [];
   var cachedCart = null;
   var rulesLoadPromise = null;
+  // Set the moment an add/change request gets clamped to a box's maxPerOrder,
+  // and shown as a toast right after the (now-clamped) request completes —
+  // the shopper asked for more than the cap allows, so they should know why
+  // their cart doesn't reflect the number they entered.
+  var pendingMysteryLimitMessage = null;
 
   console.log("GiftLab Cart Engine initialized. Root:", root);
 
@@ -121,6 +126,45 @@
           (box.boxVariantId && numericId(box.boxVariantId) === itemVid);
       });
     });
+  }
+
+  // The box a given variant id belongs to (as parent/shadow variant), or
+  // undefined if it isn't a mystery box line at all.
+  function findMysteryBoxByVariantId(variantId) {
+    if (!cachedMysteryBoxes || !cachedMysteryBoxes.length) return undefined;
+    var vid = numericId(variantId);
+    return cachedMysteryBoxes.filter(function (b) {
+      return (b.parentVariantId && numericId(b.parentVariantId) === vid) ||
+        (b.boxVariantId && numericId(b.boxVariantId) === vid);
+    })[0];
+  }
+
+  // How many units of this variant the cart already holds, summed across any
+  // lines that share it (there's normally only one, but a raw duplicate line
+  // can briefly exist before the theme/Shopify merges it).
+  function currentCartQuantityFor(variantId) {
+    if (!cachedCart || !cachedCart.items) return 0;
+    var vid = numericId(variantId);
+    var total = 0;
+    cachedCart.items.forEach(function (item) {
+      if (numericId(item.variant_id) === vid) total += item.quantity;
+    });
+    return total;
+  }
+
+  // Caps a requested quantity at the box's maxPerOrder (accounting for
+  // whatever's already in the cart), and records a toast message to show
+  // once the (now-clamped) request completes. Returns the quantity to
+  // actually send — unchanged if there's no box, no limit, or no shopper
+  // hasn't asked for more than the cap allows.
+  function clampToMysteryLimit(box, requestedQty, alreadyInCartQty) {
+    if (!box || !box.maxPerOrder) return requestedQty;
+    var allowed = Math.max(0, box.maxPerOrder - alreadyInCartQty);
+    var qty = Number(requestedQty) || 0;
+    if (qty <= allowed) return qty;
+    pendingMysteryLimitMessage = "You can add up to " + box.maxPerOrder + " of “" + box.name + "” per order.";
+    console.log("GiftLab clamping mystery box quantity from", qty, "to", allowed, "(max per order:", box.maxPerOrder, ")");
+    return allowed;
   }
 
   // The highest-minQuantity precomputed tier that still qualifies at this
@@ -1001,6 +1045,17 @@
             var mainId = options.body.get("id");
             var mainQty = options.body.get("quantity") || "1";
             if (mainId) {
+              // A mystery box's maxPerOrder caps the TOTAL the shopper can
+              // hold at once — add.js is additive, so the cap is against
+              // whatever's already in the cart plus this request.
+              var mainBox = findMysteryBoxByVariantId(mainId);
+              if (mainBox) {
+                var clampedMainQty = clampToMysteryLimit(mainBox, mainQty, currentCartQuantityFor(mainId));
+                if (String(clampedMainQty) !== String(mainQty)) {
+                  mainQty = String(clampedMainQty);
+                  options.body.set("quantity", mainQty);
+                }
+              }
               var gifts = getMatchingGiftsForPayload([{ id: mainId }]);
               if (gifts.length > 0) {
                 console.log("GiftLab batching gift items into FormData add.js payload...", gifts);
@@ -1025,6 +1080,18 @@
             if (options.body.indexOf("{") === 0) {
               var payload = JSON.parse(options.body);
               var items = payload.items || (payload.id ? [payload] : []);
+              // Same maxPerOrder cap as the FormData path above, applied to
+              // every item in this add request that's a mystery box variant.
+              // `items` aliases the same objects as payload.items/payload
+              // itself (see the `[payload]` wrap above), so mutating them
+              // here updates the real payload directly — no reassignment
+              // needed.
+              items.forEach(function (it) {
+                var itBox = it && it.id && findMysteryBoxByVariantId(it.id);
+                if (itBox) {
+                  it.quantity = clampToMysteryLimit(itBox, it.quantity || 1, currentCartQuantityFor(it.id));
+                }
+              });
               var gifts = getMatchingGiftsForPayload(items);
               if (gifts.length > 0) {
                 console.log("GiftLab batching gift items into primary JSON add.js payload...", gifts);
@@ -1032,8 +1099,8 @@
                 delete payload.id;
                 delete payload.quantity;
                 delete payload.properties;
-                options.body = JSON.stringify(payload);
               }
+              options.body = JSON.stringify(payload);
             }
           }
         }
@@ -1157,21 +1224,33 @@
               }
             });
           }
-          var mBox = targetVariantId && cachedMysteryBoxes.filter(function (b) {
-            return (b.parentVariantId && numericId(b.parentVariantId) === targetVariantId) ||
-              (b.boxVariantId && numericId(b.boxVariantId) === targetVariantId);
-          })[0];
-          if (mBox && mBox.tiers && mBox.tiers.length) {
-            var mergedProps = buildMysteryLineProperties(targetExistingProperties, mBox, newQuantity);
-            console.log("GiftLab attaching instant price-tier properties for quantity change...", mergedProps);
-            if (typeof FormData !== "undefined" && options.body instanceof FormData) {
-              Object.keys(mergedProps).forEach(function (pk) {
-                options.body.append("properties[" + pk + "]", mergedProps[pk]);
-              });
-            } else if (typeof options.body === "string") {
-              var p3 = JSON.parse(options.body);
-              p3.properties = mergedProps;
-              options.body = JSON.stringify(p3);
+          var mBox = targetVariantId && findMysteryBoxByVariantId(targetVariantId);
+          if (mBox) {
+            // A change.js call SETS the line's quantity outright (not
+            // additive), so the cap is just the new value itself.
+            var clampedQuantity = clampToMysteryLimit(mBox, newQuantity, 0);
+            if (clampedQuantity !== newQuantity) {
+              newQuantity = clampedQuantity;
+              if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+                options.body.set("quantity", String(newQuantity));
+              } else if (typeof options.body === "string") {
+                var pClamped = JSON.parse(options.body);
+                pClamped.quantity = newQuantity;
+                options.body = JSON.stringify(pClamped);
+              }
+            }
+            if (mBox.tiers && mBox.tiers.length) {
+              var mergedProps = buildMysteryLineProperties(targetExistingProperties, mBox, newQuantity);
+              console.log("GiftLab attaching instant price-tier properties for quantity change...", mergedProps);
+              if (typeof FormData !== "undefined" && options.body instanceof FormData) {
+                Object.keys(mergedProps).forEach(function (pk) {
+                  options.body.append("properties[" + pk + "]", mergedProps[pk]);
+                });
+              } else if (typeof options.body === "string") {
+                var p3 = JSON.parse(options.body);
+                p3.properties = mergedProps;
+                options.body = JSON.stringify(p3);
+              }
             }
           }
         }
@@ -1187,6 +1266,10 @@
           pendingRenderHold = false;
           evaluate();
         }
+      }
+      if (pendingMysteryLimitMessage) {
+        toast(pendingMysteryLimitMessage);
+        pendingMysteryLimitMessage = null;
       }
       return response;
     });

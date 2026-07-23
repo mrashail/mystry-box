@@ -296,6 +296,7 @@ export async function syncMysteryBoxConfig(admin: AdminClient, shop: string): Pr
       parentVariantId: box.parentVariantId ? String(numericShopifyId(box.parentVariantId)) : null,
       boxVariantId: box.boxVariantId ? String(numericShopifyId(box.boxVariantId)) : null,
       isBogo: Boolean((box.bogo as { enabled?: boolean } | null)?.enabled),
+      maxPerOrder: box.maxPerOrder ?? null,
       tiers,
     };
   });
