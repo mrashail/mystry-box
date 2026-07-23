@@ -28,6 +28,22 @@
   var cachedRules = [];
   var cachedMysteryBoxes = [];
   var cachedCart = null;
+  // True whenever cachedCart.items' ORDER is just this client's best guess
+  // (see buildKnownCartAfterAdd) rather than the server's real, confirmed
+  // line order — Shopify does not necessarily keep a batched add's line
+  // items in the order they were submitted in (verified live: a gift
+  // appended AFTER the main item in the request came back BEFORE it in the
+  // real cart). Anything that matches a cart line by POSITION (like a
+  // theme's "line N" remove button) must not trust that match while this is
+  // true, or it risks mutating the wrong line — see the /cart/change
+  // interceptor below.
+  var cachedCartOrderApproximate = false;
+  // Bumped every time cachedCart is reassigned, from ANY path — lets a
+  // fire-and-forget background correction (see correctCartOrderInBackground)
+  // confirm nothing newer has touched cachedCart while its own request was
+  // in flight before it applies its result, so it can never clobber a more
+  // recent state with a stale one.
+  var cachedCartGeneration = 0;
   var rulesLoadPromise = null;
   // Set the moment an add/change request gets clamped to a box's maxPerOrder,
   // and shown as a toast right after the (now-clamped) request completes —
@@ -279,6 +295,8 @@
       var cartResp = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1" } });
       if (cartResp.ok) {
         cachedCart = await cartResp.json();
+        cachedCartOrderApproximate = false;
+        cachedCartGeneration++;
         console.log("GiftLab loaded initial cart:", cachedCart);
       }
     } catch (e) {
@@ -593,19 +611,72 @@
     return rule.matchMode === "ANY" ? results.some(Boolean) : results.every(Boolean);
   }
 
+  // Shopify itself injects window.ShopifyAnalytics.meta.product on virtually
+  // every theme's product page — the CURRENT product's id plus every one of
+  // its variants' real prices. It's not theme markup we're guessing at, it's
+  // Shopify's own analytics beacon data, already sitting in memory before the
+  // shopper ever clicks Add to cart. Used to price the item(s) about to be
+  // added with total confidence — never a guess — so subtotal/quantity/
+  // product conditions can be checked BEFORE the request goes out. Returns
+  // null the instant the variant isn't found there (e.g. the add is for a
+  // different product than the one currently loaded), signalling the caller
+  // to fall back to the deferred, cart.js-confirmed check instead.
+  function getKnownVariantMeta(variantId) {
+    try {
+      var meta = window.ShopifyAnalytics && window.ShopifyAnalytics.meta;
+      var product = meta && meta.product;
+      if (!product || !product.variants) return null;
+      var id = numericId(variantId);
+      var match = product.variants.filter(function (v) { return numericId(v.id) === id; })[0];
+      if (!match) return null;
+      return { price: match.price, product_id: numericId(product.id) };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Builds an exact (never guessed) projection of what the cart will look
+  // like right after this /cart/add request lands, using only real prices
+  // (see getKnownVariantMeta) — never a placeholder or assumed value. Returns
+  // null the moment any single item in this request can't be priced that way,
+  // so the caller always has a clean yes/no on whether it's safe to trust.
+  function buildProbeCart(cart, items) {
+    if (!cart || !cart.items || !items || !items.length) return null;
+    var synthetic = [];
+    for (var i = 0; i < items.length; i++) {
+      var id = numericId(items[i].id);
+      if (!id) return null;
+      var meta = getKnownVariantMeta(id);
+      if (!meta) return null;
+      synthetic.push({
+        variant_id: id,
+        product_id: meta.product_id,
+        quantity: Number(items[i].quantity) || 1,
+        price: meta.price,
+        final_price: meta.price,
+        properties: {},
+      });
+    }
+    return { items: cart.items.concat(synthetic), attributes: cart.attributes };
+  }
+
   // At add-to-cart time the item(s) about to be added aren't in the cart
-  // snapshot yet, and all we know about them is a bare variant id (no price,
-  // no product id — themes send just `id`/`items[].id` to /cart/add) — not
-  // enough to safely simulate a subtotal, quantity, or product-level
-  // condition. The one thing we CAN say with total certainty is "this exact
-  // variant is one of the ones being added" — a "variant equals" condition
-  // targeting it is guaranteed true regardless of what else happens. Every
-  // other condition is judged against the cart as it stands right NOW
-  // (before this add): if this very add is what pushes it over the line, the
-  // very next evaluate() reconcile (already fast) picks it up a beat later —
-  // far better than instant-batching a gift whose condition doesn't actually
-  // end up true and having to silently un-add it (the flash the merchant saw).
-  function ruleConditionsMatchAtAddTime(rule, cart, probeVariantIds) {
+  // snapshot yet. When probeCart is available (built from real per-item
+  // prices, see buildProbeCart above) every condition — subtotal, quantity,
+  // product, variant — can be checked exactly against it, with the same
+  // matchCondition logic used everywhere else: no separate/duplicated rules,
+  // so this can never disagree with the authoritative post-add check.
+  // Without a probeCart (price unknown for at least one item), fall back to
+  // the narrower guarantee: "this exact variant is one of the ones being
+  // added" is the only thing a bare id lets us say with total certainty, so
+  // only a matching "variant equals" condition is trusted; everything else is
+  // judged against the cart as it stands right NOW (before this add) and
+  // picked up a beat later by the next evaluate() reconcile if this add is
+  // what actually pushes it over the line — far better than instant-batching
+  // a gift whose condition doesn't actually end up true and having to
+  // silently un-add it (the flash the merchant saw).
+  function ruleConditionsMatchAtAddTime(rule, cart, probeVariantIds, probeCart) {
+    if (probeCart) return ruleConditionsMatch(rule, probeCart);
     var conditions = rule.conditions || [];
     if (conditions.length === 0) return true;
     var results = conditions.map(function (cond) {
@@ -641,11 +712,11 @@
   // everything else is judged against the cart as it stands right now.
   // Omit/pass null for the normal full-reconcile pass (cart already reflects
   // everything that's happened).
-  function computeEffectiveRules(rules, cart, probeVariantIds) {
+  function computeEffectiveRules(rules, cart, probeVariantIds, probeCart) {
     var matched = (rules || []).filter(function (rule) {
       if (!ruleAllowedForCustomer(rule)) return false;
       return probeVariantIds
-        ? ruleConditionsMatchAtAddTime(rule, cart, probeVariantIds)
+        ? ruleConditionsMatchAtAddTime(rule, cart, probeVariantIds, probeCart)
         : ruleConditionsMatch(rule, cart);
     });
     matched.sort(function (a, b) { return (a.priority == null ? 100 : a.priority) - (b.priority == null ? 100 : b.priority); });
@@ -869,7 +940,32 @@
       items: mergedItems,
       items_subtotal_price: subtotal,
       item_count: mergedItems.reduce(function (sum, item) { return sum + item.quantity; }, 0),
+      // Flags this cart's item ORDER as a guess, not server-confirmed — see
+      // cachedCartOrderApproximate above.
+      _orderApproximate: true,
     };
+  }
+
+  // A batched add leaves cachedCart's order approximate (see
+  // buildKnownCartAfterAdd), which blocks the /cart/change interceptor's
+  // single-request removal merge as a safety measure. Silently fetches the
+  // real cart.js in the background — invisible to the shopper, since nothing
+  // about the just-finished add's own render depends on it — purely so that,
+  // by the time (if ever) they remove something, cachedCart's order is
+  // already server-confirmed and that merge can safely fire. Guarded by
+  // cachedCartGeneration so it never overwrites a newer state some other
+  // action produced while this fetch was in flight.
+  function correctCartOrderInBackground() {
+    var generationAtStart = cachedCartGeneration;
+    fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1", "Cache-Control": "no-cache" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (freshCart) {
+        if (!freshCart || cachedCartGeneration !== generationAtStart) return;
+        cachedCart = freshCart;
+        cachedCartOrderApproximate = false;
+        cachedCartGeneration++;
+      })
+      .catch(function () {});
   }
 
   // knownCart, when passed, is an already-accurate post-mutation cart
@@ -969,6 +1065,8 @@
         cart = await cartResponse.json();
       }
       cachedCart = cart;
+      cachedCartOrderApproximate = !!cart._orderApproximate;
+      cachedCartGeneration++;
       console.log("GiftLab cart items count:", cart.items.length, "Subtotal:", cart.items_subtotal_price);
 
       var didMutate = false;
@@ -1121,15 +1219,20 @@
     if (!cachedRules || !cachedRules.length) return [];
     if (!cachedCart) return [];
     // Customer gates (tags / first-purchase) + priority + stackable apply at
-    // add time too; conditions are checked via ruleConditionsMatchAtAddTime —
-    // only an exact "variant equals" match on one of these ids is trusted
-    // before the add lands, everything else is judged against the confirmed
-    // current cart (see that function for why: batching a gift for e.g. a
-    // subtotal condition this add doesn't actually satisfy — an unrelated
-    // low-value product like a mystery box — was exactly the "gift flashes
-    // in then vanishes" bug).
+    // add time too; conditions are checked via ruleConditionsMatchAtAddTime.
+    // When every item in this request can be priced from the page's own
+    // product metadata (buildProbeCart), ANY condition — subtotal included —
+    // is checked exactly, so a subtotal-crossing add batches its gift into
+    // this SAME request, same as a "variant equals" rule always has. If an
+    // item's price can't be resolved that way, that function falls back to
+    // trusting only an exact "variant equals" match and defers everything
+    // else to the confirmed current cart (this is why the earlier "gift
+    // flashes in then vanishes" bug — batching for a subtotal condition an
+    // unrelated low-value add didn't actually satisfy — can't recur: we only
+    // ever act on a real computed total, never a guess).
     var probeVariantIds = (items || []).map(function (it) { return numericId(it.id); }).filter(Boolean);
-    var effective = computeEffectiveRules(cachedRules, cachedCart, probeVariantIds);
+    var probeCart = buildProbeCart(cachedCart, items);
+    var effective = computeEffectiveRules(cachedRules, cachedCart, probeVariantIds, probeCart);
     var giftsToAdd = [];
     effective.forEach(function (rule) {
       if (isRuleDeclined(rule.id)) return;
@@ -1176,7 +1279,7 @@
                   options.body.set("quantity", mainQty);
                 }
               }
-              var gifts = getMatchingGiftsForPayload([{ id: mainId }]);
+              var gifts = getMatchingGiftsForPayload([{ id: mainId, quantity: mainQty }]);
               if (gifts.length > 0) {
                 console.log("GiftLab batching gift items into FormData add.js payload...", gifts);
                 options.body.delete("id");
@@ -1272,17 +1375,29 @@
         if (isRemove && cachedCart && cachedCart.items) {
           var updates = {};
           var hasGiftToRemove = false;
+          // Only trust a bare "line N" position match against cachedCart's
+          // order when that order is server-confirmed (see
+          // cachedCartOrderApproximate) — matching by key/variant id/id is
+          // always safe since those don't depend on order at all. Without
+          // this guard, a removal request landing right after a batched add
+          // (whose line order is only our best guess) could resolve "line 2"
+          // to the WRONG item and end up zeroing something the shopper never
+          // asked to remove.
+          var targetMatched = false;
           cachedCart.items.forEach(function (item, idx) {
             var lineNum = String(idx + 1);
-            if (lineOrKey === lineNum || lineOrKey === item.key || lineOrKey === String(item.variant_id) || lineOrKey === String(item.id)) {
+            var isPositionMatch = !cachedCartOrderApproximate && lineOrKey === lineNum;
+            var isKeyMatch = lineOrKey === item.key || lineOrKey === String(item.variant_id) || lineOrKey === String(item.id);
+            if (isPositionMatch || isKeyMatch) {
               updates[item.key] = 0;
+              targetMatched = true;
             } else if (item.properties && (item.properties._free_gift_rule || item.properties._promotion_kind === "free_gift")) {
               updates[item.key] = 0;
               hasGiftToRemove = true;
             }
           });
 
-          if (hasGiftToRemove) {
+          if (hasGiftToRemove && targetMatched) {
             console.log("GiftLab converting remove call to combined /cart/update.js...", updates);
             args[0] = getUrl("cart/update.js");
             var newBody = {
@@ -1396,7 +1511,19 @@
             // gift appeared — clone() so the theme's own handler still gets
             // an unconsumed body to read.
             response.clone().json().then(function (addedJson) {
-              evaluate(buildKnownCartAfterAdd(addedJson));
+              evaluate(buildKnownCartAfterAdd(addedJson)).then(correctCartOrderInBackground);
+            }).catch(function () {
+              evaluate();
+            });
+          } else if (/cart\/(change|update)/i.test(requestUrl)) {
+            // Unlike /cart/add.js (which only echoes the item(s) just added),
+            // /cart/change.js and /cart/update.js both echo back the COMPLETE
+            // post-mutation cart — the exact same shape evaluate() would
+            // otherwise re-fetch from cart.js a moment later. Using it
+            // directly removes that redundant round trip, which is what
+            // delayed a gift's removal after deleting its trigger product.
+            response.clone().json().then(function (changedCart) {
+              evaluate(changedCart && changedCart.items ? changedCart : undefined);
             }).catch(function () {
               evaluate();
             });
