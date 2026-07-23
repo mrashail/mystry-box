@@ -252,14 +252,16 @@
     if (box) {
       var tier = bestMysteryTierFor(box, quantity);
       if (tier) {
-        // Use the box's stable per-unit basePrice from config, NOT the cart
+        // Prefer the box's stable per-unit basePrice from config over the cart
         // line's own `price`: Shopify reports a line's price at LINE level
-        // (unit × quantity) transiently right after a cart mutation, before it
-        // settles to per-unit a beat later, and fires no event when it does —
-        // pricing the box off that transient value made a subtotal-gated gift
-        // wrongly qualify ($10 box × 5 momentarily read as $50/unit → $175)
-        // and then never leave. basePrice is correct the instant it's read.
-        // Falls back to the line price only if config predates basePrice.
+        // (unit × quantity) transiently for ~4s right after a cart mutation,
+        // before it settles to per-unit, firing no event when it does — so
+        // pricing off the cart value in that window made a subtotal-gated gift
+        // wrongly qualify ($10 box × 5 momentarily read as $50/unit → $175).
+        // basePrice comes straight from the box's configured price (the same
+        // value syncMysteryBoxProduct writes to the shadow product), so it's
+        // both stable and authoritative. Falls back to the (settled) cart line
+        // price only when config predates basePrice.
         var rawUnit = box.basePrice != null ? box.basePrice
           : (item.price != null ? item.price : (item.final_price != null ? item.final_price : 0));
         var value = Number(tier.value) || 0;
