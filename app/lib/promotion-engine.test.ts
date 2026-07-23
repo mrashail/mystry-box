@@ -3,6 +3,7 @@ import type { GiftRule, MysteryBox, MysteryBoxChild } from "@prisma/client";
 import {
   conditionMatches,
   desiredGiftMutations,
+  effectiveLinePrice,
   giftRuleMatches,
   pickChildren,
   priceTierForQuantity,
@@ -61,6 +62,59 @@ assert.equal(
     cart,
   ),
   true,
+);
+
+// effectiveLinePrice: a tiered mystery box must contribute its DISCOUNTED
+// total to the subtotal, so a gift threshold is judged on what the shopper
+// actually pays ($35), not the raw pre-discount price ($175). This is the
+// regression guard for "gift appeared when the discounted total was only $35".
+const mysteryCart: CartSnapshot = {
+  token: "mystery-cart",
+  subtotal: 0,
+  lines: [
+    {
+      key: "box",
+      productId: "301",
+      variantId: "301",
+      quantity: 5,
+      price: 3_500, // $35/unit raw → $175 raw total
+      properties: { _mystery_price_type: "PERCENT_OFF", _mystery_price_value: "80" },
+    },
+  ],
+  customer: { loggedIn: true },
+};
+assert.equal(
+  effectiveLinePrice(mysteryCart.lines[0]),
+  3_500,
+  "a tiered mystery box must contribute its discounted total (5 × $35 − 80% = $35), not $175",
+);
+assert.equal(
+  conditionMatches(
+    { field: "subtotal", operator: "greater_or_equal", value: 50 },
+    mysteryCart,
+  ),
+  false,
+  "a $50 gift threshold must NOT trigger when the mystery box's discounted total is only $35",
+);
+assert.equal(
+  conditionMatches(
+    { field: "subtotal", operator: "greater_or_equal", value: 30 },
+    mysteryCart,
+  ),
+  true,
+  "the discounted $35 subtotal still satisfies a $30 threshold",
+);
+assert.equal(
+  effectiveLinePrice({
+    key: "gift",
+    productId: "9",
+    variantId: "9",
+    quantity: 1,
+    price: 5_000,
+    properties: { _free_gift_rule: "rule" },
+  }),
+  0,
+  "a free gift line contributes 0 to the subtotal",
 );
 
 const rule = {

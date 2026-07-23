@@ -5,6 +5,7 @@ import { mysteryFormData } from "../lib/forms.server";
 import { syncMysteryBoxProduct, deleteMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { createPromotionDiscount, deletePromotionDiscount, ensurePromotionSecret } from "../lib/checkout-discount.server";
 import { syncMysteryBoxConfig } from "../lib/cart-transform.server";
+import { findVariantConflicts, conflictErrorMessage } from "../lib/product-conflicts.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 
@@ -36,6 +37,18 @@ export async function action({ request }: ActionFunctionArgs) {
       { error: "Please set a box price greater than 0 before saving." },
       { status: 400 },
     );
+
+  // A product may only be used in one promotion at a time — block a pool child
+  // that's already awarded by a gift rule or pooled in another box, BEFORE any
+  // Shopify product/discount side effects are created (see findVariantConflicts).
+  const conflicts = await findVariantConflicts(
+    session.shop,
+    {},
+    parsed.children.map((child) => child.variantId),
+  );
+  if (conflicts.length) {
+    return Response.json({ error: conflictErrorMessage(conflicts) }, { status: 400 });
+  }
 
   // Automatically create or sync Mystery Box product in Shopify — always a
   // single hidden variant, regardless of how many items are in the pool.
@@ -116,7 +129,13 @@ export async function action({ request }: ActionFunctionArgs) {
       { status: 500 },
     );
   }
-  await syncMysteryBoxConfig(admin, session.shop);
+  // Best-effort storefront sync — the box is already saved, so a transient
+  // sync failure must not error out over a committed row; retried next save.
+  try {
+    await syncMysteryBoxConfig(admin, session.shop);
+  } catch (error) {
+    console.error("Mystery box saved, but storefront sync failed (will retry on next save):", error);
+  }
   // Land on the new box's own edit page so the merchant stays in the form.
   return redirect(`/app/mystery-boxes/${createdBox.id}`);
 }

@@ -7,6 +7,7 @@ import {
 import { mysteryFormData } from "../lib/forms.server";
 import { syncMysteryBoxProduct } from "../lib/mystery-box-product.server";
 import { syncMysteryBoxConfig } from "../lib/cart-transform.server";
+import { findVariantConflicts, conflictErrorMessage } from "../lib/product-conflicts.server";
 import {
   createPromotionDiscount,
   deletePromotionDiscount,
@@ -71,6 +72,18 @@ export async function action({ request, params }: ActionFunctionArgs) {
       { error: "Please set a box price greater than 0 before saving." },
       { status: 400 },
     );
+
+  // A product may only be used in one promotion at a time — block a pool child
+  // already awarded by a gift rule or pooled in ANOTHER box (this box excluded)
+  // before any Shopify side effects run (see findVariantConflicts).
+  const conflicts = await findVariantConflicts(
+    session.shop,
+    { boxId: box.id },
+    parsed.children.map((child) => child.variantId),
+  );
+  if (conflicts.length) {
+    return Response.json({ error: conflictErrorMessage(conflicts) }, { status: 400 });
+  }
 
   // Always a single hidden variant, regardless of how many items are in the
   // pool — the real per-child data never becomes a storefront-visible option.
@@ -141,7 +154,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
       },
     }),
   ]);
-  await syncMysteryBoxConfig(admin, session.shop);
+  // Best-effort storefront sync — the box is already saved, so a transient
+  // sync failure must not error out over a committed row; retried next save.
+  try {
+    await syncMysteryBoxConfig(admin, session.shop);
+  } catch (error) {
+    console.error("Mystery box updated, but storefront sync failed (will retry on next save):", error);
+  }
   // Stay on this box's own edit page after saving instead of the rules list.
   return redirect(`/app/mystery-boxes/${box.id}`);
 }

@@ -101,6 +101,40 @@ function anyLine(
   });
 }
 
+// The true amount a cart line contributes to a subtotal condition, with the
+// mystery-box quantity-tier discount already applied. Mirror of the storefront
+// client's effectiveLinePrice (extensions/giftlab-cart/assets/giftlab-cart.js)
+// so server and client decide gift eligibility on the exact same number — the
+// discounted price the shopper actually pays, not the raw pre-discount price
+// that Shopify's cart-line discount Function only lowers a beat later. Reads
+// the tier straight off the line's own _mystery_price_* properties, which is
+// exactly what that Function reads (extensions/giftlab-discounts/src/run.rs).
+export function effectiveLinePrice(line: CartLineSnapshot): number {
+  if (line.properties?._mystery_box_reward || line.properties?._free_gift_rule) {
+    return 0;
+  }
+  const rawUnit = line.price ?? line.finalPrice ?? 0;
+  const priceType = line.properties?._mystery_price_type;
+  const rawValue = line.properties?._mystery_price_value;
+  if (priceType && rawValue != null && rawValue !== "") {
+    const value = Number(rawValue);
+    if (Number.isFinite(value)) {
+      let discountedUnit = rawUnit;
+      if (priceType === "PERCENT_OFF") {
+        discountedUnit = rawUnit * (1 - Math.min(100, value) / 100);
+      } else if (priceType === "FIXED_OFF") {
+        discountedUnit = Math.max(0, rawUnit - value);
+      } else if (priceType === "FIXED_PRICE") {
+        discountedUnit = Math.min(rawUnit, value);
+      }
+      // Shopify works in whole cents — round per unit so the projected
+      // subtotal matches what the discount Function actually charges.
+      return Math.round(discountedUnit) * line.quantity;
+    }
+  }
+  return (line.finalPrice ?? line.price) * line.quantity;
+}
+
 export function conditionMatches(condition: RuleCondition, cart: CartSnapshot) {
   const purchasable = cart.lines.filter(
     (line) =>
@@ -116,10 +150,8 @@ export function conditionMatches(condition: RuleCondition, cart: CartSnapshot) {
   switch (condition.field) {
     case "subtotal":
       return compare(
-        purchasable.reduce(
-          (sum, line) => sum + (line.finalPrice ?? line.price) * line.quantity,
-          0,
-        ) / 100,
+        purchasable.reduce((sum, line) => sum + effectiveLinePrice(line), 0) /
+          100,
         condition.operator,
         condition.value,
       );

@@ -9,6 +9,7 @@ import {
   ensurePromotionSecret,
 } from "../lib/checkout-discount.server";
 import { syncCartTransformRules } from "../lib/cart-transform.server";
+import { findVariantConflicts, conflictErrorMessage } from "../lib/product-conflicts.server";
 import prisma from "../db.server";
 import { authenticate } from "../shopify.server";
 import { resolveConditionLabels } from "../lib/condition-labels.server";
@@ -31,6 +32,18 @@ export async function action({ request, params }: ActionFunctionArgs) {
   const form = await request.formData();
   const gifts = json<GiftChoice[]>(form, "gifts", []);
   const name = text(form, "name");
+
+  // Block a gift already awarded by ANOTHER rule or pooled in a mystery box
+  // (this rule itself is excluded so re-saving its own gifts isn't flagged).
+  const conflicts = await findVariantConflicts(
+    session.shop,
+    { ruleId: current.id },
+    gifts.map((gift) => gift.variantId),
+  );
+  if (conflicts.length) {
+    return Response.json({ error: conflictErrorMessage(conflicts) }, { status: 400 });
+  }
+
   const enabled = checked(form, "enabled");
 
   let shopifyDiscountId = current.shopifyDiscountId;
@@ -58,7 +71,13 @@ export async function action({ request, params }: ActionFunctionArgs) {
     shopifyDiscountId,
     restrictions: { onePerOrder: checked(form, "onePerOrder"), onePerCustomer: checked(form, "onePerCustomer"), firstPurchaseOnly: checked(form, "firstPurchaseOnly"), allowedCustomerTags: text(form, "allowedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean), excludedCustomerTags: text(form, "excludedCustomerTags").split(",").map((item) => item.trim()).filter(Boolean) },
   } });
-  await syncCartTransformRules(admin, session.shop);
+  // Best-effort storefront sync — the rule is already saved, so a transient
+  // sync failure must not error out over a committed update; retried next save.
+  try {
+    await syncCartTransformRules(admin, session.shop);
+  } catch (error) {
+    console.error("Gift rule updated, but storefront sync failed (will retry on next save):", error);
+  }
   // Stay on the rule's own edit page after saving (reloads with the freshly
   // saved values) instead of bouncing back to the rules list, so the merchant
   // can keep tweaking the same rule.

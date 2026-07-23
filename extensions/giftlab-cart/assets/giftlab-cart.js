@@ -227,6 +227,50 @@
     return properties;
   }
 
+  // The true amount a cart line contributes to a subtotal/eligibility check —
+  // with the mystery-box quantity-tier discount ALREADY applied. This is the
+  // single source of truth for "what this line is really worth," so gift
+  // eligibility is decided on the exact number the shopper ends up paying,
+  // synchronously, without waiting for Shopify's async discount recompute (the
+  // tier discount is applied by a cart-line discount Function that only lands
+  // a beat after the cart mutation — see extensions/giftlab-discounts/src/run.rs).
+  // Mirrors that Function's per-unit math exactly:
+  //   PERCENT_OFF -> unit * (1 - value/100)
+  //   FIXED_OFF   -> max(0, unit - value)   (absolute amount off, per item)
+  //   FIXED_PRICE -> min(unit, value)       (per-unit target price)
+  // Gift/reward lines contribute 0 (they're free). Everything else uses the
+  // cart's own final_price (falling back to price). Always computes the box's
+  // discounted price from the RAW unit price + the known tier rather than
+  // trusting the line's final_price, because right after a mutation Shopify
+  // hasn't recomputed the discount yet and final_price is still the raw value.
+  function effectiveLinePrice(item) {
+    if (!item) return 0;
+    var quantity = item.quantity || 0;
+    var props = item.properties || {};
+    if (props._free_gift_rule || props._mystery_box_reward) return 0;
+    var rawUnit = item.price != null ? item.price : (item.final_price != null ? item.final_price : 0);
+    var box = findMysteryBoxByVariantId(item.variant_id);
+    if (box) {
+      var tier = bestMysteryTierFor(box, quantity);
+      if (tier) {
+        var value = Number(tier.value) || 0;
+        var discountedUnit = rawUnit;
+        if (tier.adjustmentType === "PERCENT_OFF") {
+          discountedUnit = rawUnit * (1 - Math.min(100, value) / 100);
+        } else if (tier.adjustmentType === "FIXED_OFF") {
+          discountedUnit = Math.max(0, rawUnit - value);
+        } else if (tier.adjustmentType === "FIXED_PRICE") {
+          discountedUnit = Math.min(rawUnit, value);
+        }
+        // Shopify works in whole cents — round per unit so the projected
+        // subtotal matches what the discount Function actually charges.
+        return Math.round(discountedUnit) * quantity;
+      }
+    }
+    var unit = item.final_price != null ? item.final_price : (item.price || 0);
+    return unit * quantity;
+  }
+
   // Attaches/refreshes the hidden random pick on a mystery box line. This
   // MUST be server-side (randomness, inventory, per-customer history, and the
   // persisted MysterySelection roll all live only there — see
@@ -510,10 +554,10 @@
     if (cond.field === "subtotal") {
       var subtotal = 0;
       cart.items.forEach(function (item) {
-        var isGift = item.properties && (item.properties._free_gift_rule || item.properties._mystery_box_reward);
-        if (!isGift) {
-          subtotal += (item.final_price || item.price || 0) * item.quantity;
-        }
+        // effectiveLinePrice already returns 0 for gift/reward lines and the
+        // discounted amount for tiered mystery boxes — the one place subtotal
+        // is defined, so add-time and reconcile can never disagree.
+        subtotal += effectiveLinePrice(item);
       });
       actualVal = subtotal / 100;
     } else if (cond.field === "quantity") {
@@ -1272,11 +1316,24 @@
               // hold at once — add.js is additive, so the cap is against
               // whatever's already in the cart plus this request.
               var mainBox = findMysteryBoxByVariantId(mainId);
+              var mainBoxProps = null;
               if (mainBox) {
                 var clampedMainQty = clampToMysteryLimit(mainBox, mainQty, currentCartQuantityFor(mainId));
                 if (String(clampedMainQty) !== String(mainQty)) {
                   mainQty = String(clampedMainQty);
                   options.body.set("quantity", mainQty);
+                }
+                // Attach the qualifying tier's precomputed, signed price
+                // properties in this SAME add request (same mechanism the
+                // /cart/change interceptor already uses) so the box carries
+                // its discount from the very first request — the discount
+                // Function then prices it correctly on the first recompute
+                // instead of only after the later server reconcile round-trip,
+                // which is what caused the box to flash its full price first.
+                if (mainBox.tiers && mainBox.tiers.length) {
+                  var mainBoxTotalQty = currentCartQuantityFor(mainId) + (Number(mainQty) || 0);
+                  var builtMainProps = buildMysteryLineProperties(null, mainBox, mainBoxTotalQty);
+                  if (Object.keys(builtMainProps).length) mainBoxProps = builtMainProps;
                 }
               }
               var gifts = getMatchingGiftsForPayload([{ id: mainId, quantity: mainQty }]);
@@ -1286,6 +1343,11 @@
                 options.body.delete("quantity");
                 options.body.append("items[0][id]", mainId);
                 options.body.append("items[0][quantity]", mainQty);
+                if (mainBoxProps) {
+                  Object.keys(mainBoxProps).forEach(function (pk) {
+                    options.body.append("items[0][properties][" + pk + "]", mainBoxProps[pk]);
+                  });
+                }
 
                 gifts.forEach(function (g, idx) {
                   var itemIdx = idx + 1;
@@ -1296,6 +1358,12 @@
                       options.body.append("items[" + itemIdx + "][properties][" + pk + "]", g.properties[pk]);
                     });
                   }
+                });
+              } else if (mainBoxProps) {
+                // No gift to batch, but the box still needs its tier price
+                // properties attached to its own (single-item) add payload.
+                Object.keys(mainBoxProps).forEach(function (pk) {
+                  options.body.append("properties[" + pk + "]", mainBoxProps[pk]);
                 });
               }
             }
@@ -1313,6 +1381,14 @@
                 var itBox = it && it.id && findMysteryBoxByVariantId(it.id);
                 if (itBox) {
                   it.quantity = clampToMysteryLimit(itBox, it.quantity || 1, currentCartQuantityFor(it.id));
+                  // Same first-request tier-price attachment as the FormData
+                  // path above, so a JSON add also lands the box already
+                  // priced instead of flashing its full price.
+                  if (itBox.tiers && itBox.tiers.length) {
+                    var itTotalQty = currentCartQuantityFor(it.id) + (Number(it.quantity) || 0);
+                    var itProps = buildMysteryLineProperties(it.properties || null, itBox, itTotalQty);
+                    if (Object.keys(itProps).length) it.properties = itProps;
+                  }
                 }
               });
               var gifts = getMatchingGiftsForPayload(items);
