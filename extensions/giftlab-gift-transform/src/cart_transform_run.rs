@@ -152,11 +152,24 @@ fn cart_transform_run(
 
     let mut operations = vec![];
 
-    // Find the carrier line: the first non-gift cart line
+    // Find the carrier line: the first non-gift, non-mystery-box cart line.
+    // A mystery box line must NEVER become the carrier this function expands:
+    // its own displayed price is already governed by a SEPARATE line-level
+    // discount (the quantity-tier Discount Function), which — because Cart
+    // Transform functions run BEFORE Discount functions in Shopify's pipeline
+    // — this function cannot see. cost().subtotal_amount() below is always
+    // the box's RAW, pre-tier-discount price, so a quantity that crosses the
+    // gift's subtotal threshold on raw cost alone (while the shopper's real,
+    // discounted cost hasn't) wrongly qualified the box as carrier and
+    // attempted to expand it — corrupting its own price/quantity display in
+    // the online store cart (verified live: quantities 5-7 of a $10 box with
+    // 30% off at qty>=2 raw to $50-70, crossing the $50 gift threshold on raw
+    // cost while real cost is only $35-49 — exactly the affected range).
     let carrier_line = input.cart().lines().iter().find(|l| {
         l.promotion_kind()
             .and_then(|a| a.value())
             .map(|s| s.as_str()) != Some("free_gift")
+            && l.mystery_box_id().and_then(|a| a.value()).is_none()
     });
 
     if let Some(carrier) = carrier_line {

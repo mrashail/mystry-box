@@ -39,6 +39,9 @@ query CartTransformRunInput {
       promotionKind: attribute(key: "_promotion_kind") {
         value
       }
+      mysteryBoxId: attribute(key: "_mystery_box_id") {
+        value
+      }
     }
   }
   cartTransform {
