@@ -697,33 +697,17 @@
     });
 
     var mutations = [];
-    // Add missing gifts (only the resolved subset — respects Allow multiple /
-    // Max gifts / One per order)
+    // Add missing gifts, and correct one whose live line no longer matches
+    // what's currently configured — only the resolved subset (respects Allow
+    // multiple / Max gifts / One per order).
     matchedRules.forEach(function (rule) {
       if (declinedSet[rule.id]) return;
       resolveGiftsForRule(rule).forEach(function (gift) {
         var current = cart.items.find(function (item) {
           return item.properties && item.properties._free_gift_rule === rule.id && numericId(item.variant_id) === numericId(gift.variantId);
         });
+        var properties = buildFreeGiftProperties(rule, gift);
         if (!current) {
-          var properties = {
-            _free_gift_rule: rule.id,
-            _promotion_kind: "free_gift",
-            _free_gift_discount_type: gift.discountType,
-            _free_gift_discount_value: String(gift.discountValue),
-            // Signed awarded quantity (must match gift.quantity, which the
-            // app-proxy loader baked into gift.signature) so the checkout
-            // Function only discounts this many units.
-            _free_gift_qty: String(gift.quantity),
-            _free_gift_name: rule.name,
-            _promotion_signature: gift.signature,
-            "Free gift": rule.name
-          };
-          if (rule.unverifiable) {
-            properties._free_gift_unverifiable = "true";
-          } else {
-            properties._free_gift_conditions = rule.conditionsBlob;
-          }
           mutations.push({
             type: "ADD",
             variantId: gift.variantId,
@@ -733,6 +717,25 @@
             // toast reflects what the merchant wrote for this specific rule
             // (falls back to the block's default message downstream).
             notification: rule.notification || ""
+          });
+        } else if (
+          current.quantity !== gift.quantity ||
+          (current.properties && current.properties._promotion_signature) !== properties._promotion_signature
+        ) {
+          // The gift line exists but doesn't match the CURRENT config anymore
+          // — e.g. the merchant changed the per-gift Qty (or discount
+          // type/value) after this line was added. Presence-only checking
+          // (the old logic here) never caught this: the shopper kept
+          // whatever quantity/discount was signed in at the moment it was
+          // first added, forever, however long the merchant's config later
+          // changed — which is exactly the "still behaves like the old
+          // (stale) config" symptom. Correct it in place, same as the
+          // server-side engine already does for the fallback path.
+          mutations.push({
+            type: "CHANGE",
+            lineKey: current.key || current.variant_id,
+            quantity: gift.quantity,
+            properties: properties
           });
         }
       });
@@ -1005,12 +1008,21 @@
     return /cart-drawer|cart-icon-bubble/i.test(requested);
   }
 
-  function buildGiftItemPayload(rule, gift) {
+  // Single source of truth for a free-gift line's properties — used both by
+  // the instant add-time batch (buildGiftItemPayload) and by
+  // evaluateRulesLocally's add/correct pass, so a rule's current Qty/discount
+  // config is expressed identically everywhere instead of duplicated
+  // (duplicated copies are exactly how the add path and the correction path
+  // could disagree on what the line "should" look like).
+  function buildFreeGiftProperties(rule, gift) {
     var properties = {
       _free_gift_rule: rule.id,
       _promotion_kind: "free_gift",
       _free_gift_discount_type: gift.discountType,
       _free_gift_discount_value: String(gift.discountValue),
+      // Signed awarded quantity (must match gift.quantity, which the
+      // app-proxy loader baked into gift.signature) so the checkout
+      // Function only discounts this many units.
       _free_gift_qty: String(gift.quantity),
       _free_gift_name: rule.name,
       _promotion_signature: gift.signature || "",
@@ -1020,13 +1032,17 @@
     // over discountType|discountValue|qty|<conditions-or-UNVERIFIABLE>. If we
     // don't carry the matching conditions blob (or the unverifiable flag),
     // that reconstruction won't match the signature and the gift is charged
-    // at checkout instead of being $0. evaluateRulesLocally's add path already
-    // attaches these; the batched-add path must attach them identically.
+    // at checkout instead of being $0.
     if (rule.unverifiable) {
       properties._free_gift_unverifiable = "true";
     } else if (rule.conditionsBlob) {
       properties._free_gift_conditions = rule.conditionsBlob;
     }
+    return properties;
+  }
+
+  function buildGiftItemPayload(rule, gift) {
+    var properties = buildFreeGiftProperties(rule, gift);
     return { id: gift.variantId, quantity: gift.quantity, properties: properties };
   }
 
