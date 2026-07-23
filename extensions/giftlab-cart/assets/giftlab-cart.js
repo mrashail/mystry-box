@@ -742,6 +742,157 @@
     }
   }
 
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  // The correct per-unit price this cart line SHOULD show right now (same
+  // stable-price preference and tier math as effectiveLinePrice), used to
+  // detect whether Shopify's own cart-line discount Function has finished its
+  // async recompute yet. Returns null only if no stable price source exists
+  // at all (falls back to whatever the item itself reports).
+  function mysteryBoxExpectedUnitPrice(box, item) {
+    var rawUnit = box.basePrice != null ? box.basePrice : null;
+    if (rawUnit == null) {
+      var meta = getKnownVariantMeta(item.variant_id);
+      if (meta && meta.price != null) rawUnit = meta.price;
+    }
+    if (rawUnit == null) rawUnit = item.price != null ? item.price : item.final_price;
+    if (rawUnit == null) return null;
+    var tier = bestMysteryTierFor(box, item.quantity);
+    if (!tier) return Math.round(rawUnit);
+    var value = Number(tier.value) || 0;
+    var discountedUnit = rawUnit;
+    if (tier.adjustmentType === "PERCENT_OFF") discountedUnit = rawUnit * (1 - Math.min(100, value) / 100);
+    else if (tier.adjustmentType === "FIXED_OFF") discountedUnit = Math.max(0, rawUnit - value);
+    else if (tier.adjustmentType === "FIXED_PRICE") discountedUnit = Math.min(rawUnit, value);
+    return Math.round(discountedUnit);
+  }
+
+  // True the moment ANY mystery-box cart line's price hasn't caught up with
+  // what it should be — either a qualifying tier not discounted yet, or a
+  // discount still showing after the quantity dropped below the tier. This is
+  // genuine Shopify-side latency in extensions/giftlab-discounts (the
+  // cart-line discount Function recomputes asynchronously after a mutation) —
+  // not something an app can make instant, only detect and wait out.
+  function cartHasUnsettledMysteryPrice(cart) {
+    if (!cart || !cart.items) return false;
+    return cart.items.some(function (item) {
+      var box = findMysteryBoxByVariantId(item.variant_id);
+      if (!box) return false;
+      var expected = mysteryBoxExpectedUnitPrice(box, item);
+      if (expected == null) return false;
+      var actual = item.final_price != null ? item.final_price : item.price;
+      return Math.abs(actual - expected) > 1;
+    });
+  }
+
+  // Polls cart.js (silent) until every mystery box line's price matches what
+  // it should be, or a cap is hit — the cap exists so a shopper's own action
+  // is never held hostage indefinitely if Shopify's recompute is unusually
+  // slow; on cap-out the caller falls back to the original (unheld) response.
+  // Returns { cart, neededWait } once every mystery box line's price is
+  // correct, or null if it never settled within the cap. neededWait is false
+  // when the very FIRST check already found nothing wrong (the overwhelming
+  // common case — no box involved, or its price was already correct) — the
+  // caller uses that to skip the extra sections-refetch/response-swap work
+  // entirely when there was genuinely nothing to hold for.
+  async function pollForSettledMysteryCart() {
+    var maxAttempts = 10;
+    var delayMs = 300;
+    var neededWait = false;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      var probe;
+      try {
+        probe = await fetch(getUrl("cart.js"), { credentials: "same-origin", cache: "no-store", headers: { "X-GiftLab-Internal": "1", "Cache-Control": "no-cache" } });
+      } catch (e) {
+        return null;
+      }
+      if (!probe.ok) return null;
+      var probeCart = await probe.json();
+      if (!cartHasUnsettledMysteryPrice(probeCart)) return { cart: probeCart, neededWait: neededWait };
+      neededWait = true;
+      if (attempt < maxAttempts - 1) await sleep(delayMs);
+    }
+    return null;
+  }
+
+  // Fetches freshly rendered section HTML via a genuine no-op /cart/update.js
+  // call (an empty `updates` object changes nothing) — the same official Ajax
+  // Cart API endpoint the rest of this app already uses to repaint the
+  // drawer, just used here to get HTML that reflects the NOW-settled price.
+  async function fetchFreshSections(sectionsParam) {
+    var resp;
+    try {
+      resp = await fetch(getUrl("cart/update.js"), {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+        headers: { "Content-Type": "application/json", "X-GiftLab-Internal": "1" },
+        body: JSON.stringify({ updates: {}, sections: sectionsParam })
+      });
+    } catch (e) {
+      return null;
+    }
+    if (!resp.ok) return null;
+    return resp.json();
+  }
+
+  // If the shopper's own native add/change request affects a mystery box
+  // whose discount hasn't caught up yet, holds what the THEME's own fetch
+  // handler receives until it has — trading a brief pause for NEVER painting
+  // Shopify's not-yet-discounted number (the "$175 then $42" flash). Returns
+  // a corrected Response in the SAME shape as the original response (only the
+  // price-related fields + sections HTML are patched — everything else the
+  // theme might read, id/key/errors/etc., is passed through untouched), or
+  // null to mean "nothing needed holding, return the original response."
+  async function holdForSettledMysteryPrice(response, requestUrl) {
+    if (!cachedMysteryBoxes || !cachedMysteryBoxes.some(function (b) { return b.tiers && b.tiers.length; })) {
+      return null;
+    }
+    var originalJson;
+    try {
+      originalJson = await response.clone().json();
+    } catch (e) {
+      return null;
+    }
+
+    var settled = await pollForSettledMysteryCart();
+    if (!settled || !settled.neededWait) return null;
+    var settledCart = settled.cart;
+
+    var sectionsParam = "cart-drawer,cart-icon-bubble,main-cart-items,main-cart-footer";
+    var secMatch = requestUrl.match(/[?&]sections=([^&]*)/i);
+    if (secMatch) sectionsParam = decodeURIComponent(secMatch[1]);
+    var fresh = await fetchFreshSections(sectionsParam);
+    var freshSections = fresh && fresh.sections ? fresh.sections : null;
+
+    if (/cart\/(change|update)/i.test(requestUrl)) {
+      // Both endpoints already return a full Cart object — swap it wholesale
+      // for the settled one.
+      var merged = Object.assign({}, settledCart);
+      if (freshSections) merged.sections = freshSections;
+      return new Response(JSON.stringify(merged), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+
+    // /cart/add.js: keep the ORIGINAL body's shape and every field except the
+    // price-related ones for a mystery-box item, patched from the settled
+    // cart, so anything else the theme reads is exactly what Shopify sent.
+    var items = originalJson.items || (originalJson.id ? [originalJson] : null);
+    if (items) {
+      items.forEach(function (it) {
+        var settledLine = settledCart.items.filter(function (s) { return numericId(s.variant_id) === numericId(it.variant_id); })[0];
+        if (settledLine) {
+          it.price = settledLine.price;
+          it.final_price = settledLine.final_price;
+          it.line_price = settledLine.final_price * it.quantity;
+          it.original_line_price = settledLine.price * it.quantity;
+          if (settledLine.discounted_price != null) it.discounted_price = settledLine.discounted_price;
+        }
+      });
+    }
+    if (freshSections) originalJson.sections = freshSections;
+    return new Response(JSON.stringify(originalJson), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+
   // Builds an exact (never guessed) projection of what the cart will look
   // like right after this /cart/add request lands, using only real prices
   // (see getKnownVariantMeta) — never a placeholder or assumed value. Returns
@@ -1658,7 +1809,7 @@
       }
     }
 
-    return originalFetch.apply(window, args).then(function (response) {
+    return originalFetch.apply(window, args).then(async function (response) {
       if (!isInternal && isCartAction(requestUrl)) {
         if (response.ok) {
           console.log("GiftLab: External cart fetch succeeded. Triggering instant evaluate()...");
@@ -1699,6 +1850,18 @@
       if (pendingMysteryLimitMessage) {
         toast(pendingMysteryLimitMessage);
         pendingMysteryLimitMessage = null;
+      }
+      // Native add/change requests only: if this touched a mystery box whose
+      // discount hasn't caught up with Shopify's own async recompute yet,
+      // hold what the THEME receives until it has, so it only ever paints
+      // the correct number — never Shopify's raw pre-discount one.
+      if (!isInternal && isCartAction(requestUrl) && response.ok) {
+        try {
+          var settledResponse = await holdForSettledMysteryPrice(response, requestUrl);
+          if (settledResponse) return settledResponse;
+        } catch (e) {
+          console.warn("GiftLab: mystery price settle-hold failed, returning the original response", e);
+        }
       }
       return response;
     });
